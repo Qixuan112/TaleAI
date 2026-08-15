@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 虚拟环境
+.venv/
+venv/
+
+# uv
+uv.lock
+
+# 运行时数据(本地生成,不提交)
+data/
+*.db
+*.sqlite
+*.sqlite3
+
+# 密钥(绝不能提交!)
+.env
+*.key
+secrets*.json
+data/config/secrets.json
+
+# IDE / 系统
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# 项目内文档与技能(本地参考,不提交)
+.github/
+docs/
