@@ -1,12 +1,8 @@
-"""config 模块测试 —— 这是说明书,照着实现 src/core/config/ 下的代码。
+"""config 模块测试 —— 说明 Config 类的行为。
 
-要实现的模块:
+模块:
 - src/core/config/default.py:  DEFAULT_CONFIG 字典,存默认配置
-- src/core/config/loader.py:   load_config() 函数,加载配置并和默认值合并
-
-M0 阶段配置只需要这几个字段(都来自设计文档 §1.6 / 附录 E):
-- llm: 模型相关(provider / model / api_keys 数组)
-- bot:  角色名称
+- src/core/config/loader.py:   Config 类,五域加载 + 默认合并 + 原子写
 """
 
 import os
@@ -43,32 +39,53 @@ def test_default_bot_name():
     assert DEFAULT_CONFIG["bot"]["name"] == "初念"
 
 
-def test_load_config_returns_defaults_when_no_file():
-    """没有配置文件时,load_config() 返回默认配置。"""
-    from core.config.loader import load_config
+def test_load_config_returns_defaults_when_no_file(tmp_path):
+    """没有配置文件时,Config.load() 写入并返回默认配置。"""
+    from core.config.loader import Config
 
-    cfg = load_config()
-    assert cfg["bot"]["name"] == "初念"
-    assert isinstance(cfg["llm"]["api_keys"], list)
+    path = tmp_path / "config.json"
+    cfg = Config.load("config", path=path)
+    assert cfg.get("bot", {}).get("name") == "初念"
+    assert isinstance(cfg.get("llm", {}).get("api_keys"), list)
 
 
-def test_load_config_merges_user_file():
+def test_load_config_merges_user_file(tmp_path):
     """有配置文件时,用户配置覆盖默认配置,没写的字段保留默认值。"""
     import json
-    import tempfile
 
-    from core.config.loader import load_config
+    from core.config.loader import Config
 
     # 造一个临时配置文件,只覆盖 bot 名字
-    tmp = tempfile.NamedTemporaryFile(
-        mode="w", suffix=".json", delete=False, encoding="utf-8"
-    )
-    json.dump({"bot": {"name": "测试名"}}, tmp)
-    tmp.close()
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"bot": {"name": "测试名"}}), encoding="utf-8")
+
+    cfg = Config.load("config", path=path)
+    assert cfg.get("bot", {}).get("name") == "测试名"    # 用户值生效
+    assert cfg.get("llm", {}).get("provider") is not None  # 默认值保留
+
+
+def test_config_unknown_domain(tmp_path):
+    """未知配置域应抛 ValueError。"""
+    from core.config.loader import Config
 
     try:
-        cfg = load_config(tmp.name)
-        assert cfg["bot"]["name"] == "测试名"          # 用户值生效
-        assert cfg["llm"]["provider"] is not None      # 默认值保留
-    finally:
-        os.unlink(tmp.name)
+        Config.load("nope", path=tmp_path / "x.json")
+        assert False, "应该抛出 ValueError"
+    except ValueError:
+        pass
+
+
+def test_config_save_and_reload(tmp_path):
+    """save() 原子写入,再次 load 能读回。"""
+    import json
+
+    from core.config.loader import Config
+
+    path = tmp_path / "config.json"
+    cfg = Config.load("config", path=path)
+    cfg.data["bot"] = {"name": "改名"}
+    cfg.save()
+
+    # 重新加载应读到改成后的内容
+    cfg2 = Config.load("config", path=path)
+    assert cfg2.get("bot", {}).get("name") == "改名"
