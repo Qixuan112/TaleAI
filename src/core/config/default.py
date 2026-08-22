@@ -4,11 +4,12 @@ M0 阶段只需要 llm / bot / platforms 三块（见设计文档 §1.6 配置�
 """
 
 DEFAULT_CONFIG = {
-    # 模型相关：provider / model / api_keys
+    # 模型相关：provider / base_url / model / api_key
     "llm": {
-        "provider": "openai",  # 占位值，真实接入时再改；不能为 None
-        "model": "gpt-4o-mini",  # 占位值
-        "api_keys": [],  # 必须是列表，多 key 可扩展
+        "provider": "openai-compatible",  # OpenAI 兼容服务
+        "base_url": "https://opencode.ai/zen/go/v1",  # 服务商网关（必须是 /v1 结尾的 API 地址）
+        "model": "deepseek-v4-flash",  # 模型名
+        "api_keys": [],  # 真正的 key 放 secrets.json
     },
     # 角色配置
     "bot": {
