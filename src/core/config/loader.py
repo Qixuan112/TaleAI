@@ -82,14 +82,14 @@ class Config:
         if not file_path.exists():
             # 文件不存在：写入默认值
             data = copy.deepcopy(default)
-            Config(domain=domain, data=data, path=file_path).save()
-            return Config(domain=domain, data=data, path=file_path)
+            cls(domain=domain, data=data, path=file_path).save()
+            return cls(domain=domain, data=data, path=file_path)
 
         with open(file_path, "r", encoding="utf-8") as f:
             user_data = json.load(f)
 
         merged = _deep_merge(default, user_data)
-        return Config(domain=domain, data=merged, path=file_path)
+        return cls(domain=domain, data=merged, path=file_path)
 
     def get(self, key, default=None):
         """查询某个 key 的配置值，不存在返回 default。"""
