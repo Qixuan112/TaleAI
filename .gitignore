@@ -36,5 +36,10 @@ Thumbs.db
 .github/
 docs/
 
+# allow CI workflows to be tracked
+!/.github/
+!/.github/workflows/
+!/.github/workflows/**
+
 # 教学/实验用临时脚本(不进正式代码)
 _scratch/
