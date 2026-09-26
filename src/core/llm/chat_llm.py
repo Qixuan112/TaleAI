@@ -19,10 +19,15 @@ from typing import Any
 from openai import AsyncOpenAI
 
 from core.config.loader import Config
+from core.llm.context import ContextAssembler
 from core.llm.persona_llm.base import Persona
 from core.xml_parser import ParsedOutput, XmlParser
 
 logger = logging.getLogger(__name__)
+# 库不该在应用没配日志时往 stderr 喷东西（Python 的 lastResort 会兜底打印，
+# 结果内部 warning 直接糊到用户脸上——实测过）。NullHandler 让它静默，
+# 等 §18.1 的 Logging.init() 配好 root logger 后，照常经 propagate 输出。
+logger.addHandler(logging.NullHandler())
 
 
 class ChatLLM:
@@ -55,15 +60,20 @@ class ChatLLM:
         self.history_trim_to: int = int(llm.get("history_trim_to", 10))
         # 异步客户端（openai 3.x 是异步优先）
         self.client = AsyncOpenAI(base_url=self.base_url, api_key=self.api_key)
+        # 上下文装配（M0-03 欠的那半）：动态块由它准备，本类不自己拼（§18.5 硬规则 6）
+        self.context = ContextAssembler()
 
     def assemble_messages(
         self, user_question: str, history: list[dict[str, str]] | None = None
     ) -> list[dict[str, str]]:
         """装配：稳定前缀（人格 system）+ 会动尾巴（历史 + 最新提问）。
 
-        这就是你在 demo_context.py 里亲手写的那套思路：
-        把稳定的放前面当前缀，把会动的放最后面。
-        历史对话 = 会动尾巴的一部分（user/assistant 交替，原样追加，不改身体）。
+        动态块（M0 只有环境块=当前时间）拼到**最新 user 消息头部**，
+        用 <system_reminder> 包裹（§十二）。
+
+        关键：reminder 只进本次请求，**不写回 history**（persist=False）。
+        否则每轮都往历史里塞一份时间戳，上下文会越滚越大。
+        history 是调用方的 list，这里绝不改它。
         """
         messages: list[dict[str, str]] = [
             {"role": "system", "content": self.persona.build_system_prompt()},  # 稳定 → 前缀
@@ -74,8 +84,12 @@ class ChatLLM:
             trimmed = self._trim_history_if_needed(history)
             messages.extend(trimmed)
 
+        # 动态块包在 <system_reminder> 里，贴在最新提问前面
+        reminder = self.context.render_reminder(self.context.assemble("chat"))
+        content = f"{reminder}\n{user_question}" if reminder else user_question
+
         # 最新提问放在最末尾（会动部分）
-        messages.append({"role": "user", "content": user_question})
+        messages.append({"role": "user", "content": content})
         return messages
 
     def _trim_history_if_needed(self, history: list[dict[str, str]]) -> list[dict[str, str]]:
