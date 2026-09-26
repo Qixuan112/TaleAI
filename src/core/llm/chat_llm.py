@@ -28,9 +28,15 @@ class ChatLLM:
         cfg = Config.load("config")
         secrets = Config.load("secrets")
         llm = cfg.get("llm", {})
-        # base_url / model 必须存在（来自 config.json 或默认值），否则抛错更早暴露配置问题
-        self.base_url: str = llm["base_url"]
-        self.model: str = llm["model"]
+        # base_url / model 是用户配置（默认值为空），缺了就没法工作。
+        # 这里主动校验并给出可操作的提示，而不是等 provider 返回难懂的 403。
+        self.base_url: str = llm.get("base_url", "")
+        self.model: str = llm.get("model", "")
+        if not self.base_url or not self.model:
+            raise ValueError(
+                "llm.base_url / llm.model 未配置。请在 data/config/config.json 里填写"
+                " 服务商网关地址（以 /v1 结尾）与模型名。"
+            )
         self.api_key: str = secrets.get("llm", {}).get("api_key", "")
 
         # 人格（M0-03 第一半：初念）
