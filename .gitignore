@@ -36,5 +36,13 @@ Thumbs.db
 .github/
 docs/
 
+# allow CI workflows to be tracked(例外:先整体放行 .github,再单独排除)
+!/.github/
+!/.github/workflows/
+!/.github/workflows/**
+
+# 技能包是本地参考,不放行(须写在上面例外之后,gitignore 是"最后匹配者生效")
+.github/skills/
+
 # 教学/实验用临时脚本(不进正式代码)
 _scratch/
