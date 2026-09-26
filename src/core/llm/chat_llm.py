@@ -25,8 +25,8 @@ from core.xml_parser import ParsedOutput, XmlParser
 
 logger = logging.getLogger(__name__)
 # 库不该在应用没配日志时往 stderr 喷东西（Python 的 lastResort 会兜底打印，
-# 结果内部 warning 直接糊到用户脸上——实测过）。NullHandler 让它静默，
-# 等 §18.1 的 Logging.init() 配好 root logger 后，照常经 propagate 输出。
+# 结果内部 warning 直接糊到用户脸上——实测过）。NullHandler 让它静默；
+# main 启动时调 Logging.init() 配好 root logger 后，照常经 propagate 输出到文件。
 logger.addHandler(logging.NullHandler())
 
 
