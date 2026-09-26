@@ -7,9 +7,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
 from core.llm.chat_llm import ChatLLM
+from core.log import Logging
 
 
 def main() -> None:
+    Logging.init()  # 启动第 2 步：日志落 data/logs/，按天轮转
     bot = ChatLLM()
     history: list[dict[str, str]] = []  # 聊天记忆（role + content）
 
