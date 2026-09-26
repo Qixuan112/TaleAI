@@ -4,10 +4,6 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent
 # prompts/ 在上一级
 PROMPTS_DIR = BASE_DIR.parent / "prompts"
-# 项目根（爬 3 层）
-PROJECT_ROOT = BASE_DIR.parents[3]
-# data/config/
-CONFIG_DIR = PROJECT_ROOT / "data" / "config"
 
 
 class Persona:
@@ -18,10 +14,10 @@ class Persona:
     """
 
     def __init__(self):
-        # 用上面定义好的目录常量，拼出三个文件的完整路径
+        # 三份静态块都放在 prompts/ 下，随源码一起进仓库（CI 才能验字节稳定）
         self.base_path = PROMPTS_DIR / "base.md"
         self.chat_path = PROMPTS_DIR / "chat.md"
-        self.persona_path = CONFIG_DIR / "persona.md"
+        self.persona_path = PROMPTS_DIR / "persona.md"
         # 方案 A：创建实例时拼一次并缓存
         self.system_prompt = self._build()
 
