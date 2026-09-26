@@ -3,7 +3,8 @@
 这是 M0-03 的第二半（正式版）：
 - Persona 负责"人格 system 提示词"（M0-03 第一半，已实现）
 - ChatLLM 负责"装配上下文 + 发送请求 + 拿回复"
-- 入口：ChatLLM.chat(user_question) -> 初念的回复文本
+- XmlParser 负责把 <msg> 标签摘掉（M0-04）
+- 入口：ChatLLM.chat(user_question) -> 解析后给用户看的文本
 
 用法（配合 main.py）：
     from core.llm.chat_llm import ChatLLM
@@ -12,12 +13,16 @@
 """
 
 import asyncio
+import logging
 from typing import Any
 
 from openai import AsyncOpenAI
 
 from core.config.loader import Config
 from core.llm.persona_llm.base import Persona
+from core.xml_parser import ParsedOutput, XmlParser
+
+logger = logging.getLogger(__name__)
 
 
 class ChatLLM:
@@ -41,6 +46,8 @@ class ChatLLM:
 
         # 人格（M0-03 第一半：初念）
         self.persona = Persona()
+        # 输出解析（M0-04）：把 <msg> 标签从模型输出里摘出来
+        self.parser = XmlParser()
         # 历史裁剪策略：弹簧窗口（默认以回合为单位）
         # 可通过 data/config/config.json 的 llm 字段配置：
         #   "history_max_turns": 40, "history_trim_to": 10
@@ -113,7 +120,29 @@ class ChatLLM:
         )
         return resp.choices[0].message.content or ""
 
+    def _parse_reply(self, raw: str) -> str:
+        """把模型的原始输出解析成给用户看的文本（M0-04）。
+
+        模型被要求用 <msg> 包住要说的话，这里把标签摘掉。一次回复可能有
+        多段 <msg>，用空行拼起来。
+
+        兜底时记 warning：模型没按契约输出是可观测事件，不该悄悄放过。
+        但用户仍能看到原文——解析失败不能让他收到空白（§19-1）。
+
+        注：文档最终形态是 chat() 返回 Reply 对象（含 messages 列表、
+        tool_calls_made、stop_reason）。现在 M0-08 的 FC 循环还没做，
+        先返回拼接后的纯文本，等那时再立起 Reply。
+        """
+        parsed: ParsedOutput = self.parser.parse(raw)
+        if parsed.is_fallback:
+            logger.warning("模型输出未含 <msg>，按纯文本兜底：%r", raw[:120])
+        return "\n\n".join(parsed.messages)
+
     def chat(self, user_question: str, history: list[dict[str, str]] | None = None) -> str:
-        """同步入口：输入一句话（可带历史），返回初念的回复。"""
+        """同步入口：输入一句话（可带历史），返回初念要说给用户的话。
+
+        返回的是**解析后**的文本——<msg> 标签已经摘掉。
+        """
         messages = self.assemble_messages(user_question, history)
-        return asyncio.run(self._request(messages))
+        raw = asyncio.run(self._request(messages))
+        return self._parse_reply(raw)
