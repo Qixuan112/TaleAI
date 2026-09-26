@@ -11,9 +11,24 @@ from core.llm.chat_llm import ChatLLM
 
 def main() -> None:
     bot = ChatLLM()
-    reply = bot.chat("你好呀，今天想跟我说点什么？")
-    print("\n===== 初念的回复 =====\n")
-    print(reply)
+    history: list[dict[str, str]] = []  # 聊天记忆（role + content）
+
+    print("===== 初念在等你聊天（输入 退出/quit 结束） =====\n")
+
+    while True:
+        user_input = input("你: ").strip()
+        if user_input.lower() in {"退出", "quit", "exit", "q"}:
+            print("\n初念: 那我们就聊到这吧~ 下次见！")
+            break
+
+        # 带上历史去问初念（稳定前缀 + 会动尾巴）
+        reply = bot.chat(user_input, history)
+
+        # 把这一轮记进记忆，下次它还记得
+        history.append({"role": "user", "content": user_input})
+        history.append({"role": "assistant", "content": reply})
+
+        print(f"\n初念: {reply}\n")
 
 
 if __name__ == "__main__":

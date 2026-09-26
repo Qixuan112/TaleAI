@@ -91,7 +91,7 @@ class Config:
         merged = _deep_merge(default, user_data)
         return cls(domain=domain, data=merged, path=file_path)
 
-    def get(self, key, default=None):
+    def get(self, key, default=None) -> dict:
         """查询某个 key 的配置值，不存在返回 default。"""
         return self.data.get(key, default)
 
