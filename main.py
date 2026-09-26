@@ -17,6 +17,8 @@ def main() -> None:
 
     while True:
         user_input = input("你: ").strip()
+        if not user_input:
+            continue  # 空行（直接回车）不发请求，重新等待输入
         if user_input.lower() in {"退出", "quit", "exit", "q"}:
             print("\n初念: 那我们就聊到这吧~ 下次见！")
             break
