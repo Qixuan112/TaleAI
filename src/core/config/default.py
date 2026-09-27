@@ -17,6 +17,7 @@ DEFAULT_CONFIG = {
         "api_keys": [],  # 真正的 key 放 secrets.json
         "history_max_turns": 40,  # 弹簧窗口：超过这个回合数才裁剪
         "history_trim_to": 10,  # 裁剪后保留的回合数
+        "max_agent_steps": 3,  # FC 循环上限（§19-2：全局 3 轮不变）
     },
     # 角色配置
     "bot": {

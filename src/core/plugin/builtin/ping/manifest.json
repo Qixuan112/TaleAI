@@ -1,0 +1,6 @@
+{
+  "name": "ping",
+  "version": "0.1.0",
+  "description": "冒烟工具：无参，调用返回 pong。用于验证 FC 链路与循环检测。",
+  "permissions": []
+}
