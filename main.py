@@ -97,8 +97,11 @@ async def handle_message(
         return None
 
     # 会话行必须先存在（messages 有外键指过来）。幂等。
+    # kind 必须跟着消息走——此前漏传，导致群聊会话在库里被记成 private
+    # （与 §18.3 的 sessions.kind 定义不符）
     store.ensure_session(
-        session_id, platform=message.platform, owner=message.owner
+        session_id, platform=message.platform, owner=message.owner,
+        kind=message.session_type or "private",
     )
 
     # 第 4 步：收即存——**先读历史、再落库**。
@@ -112,9 +115,13 @@ async def handle_message(
         logger.exception("用户消息落库失败，跳过本轮")
         return None
 
-    # 第 5~6 步：装配 + FC 循环（装配在 run_loop 内部完成，§18.5 硬规则 6）
+    # 第 5~6 步：装配 + FC 循环（装配在 run_loop 内部完成，§18.5 硬规则 6）。
+    # 会话类型/owner 一路带给装配——模型据此知道自己在群聊还是私聊（§十二）
     try:
-        reply = await bot.run_loop(message.content, history, session_id)
+        reply = await bot.run_loop(
+            message.content, history, session_id,
+            session_type=message.session_type, owner=message.owner,
+        )
     except Exception as exc:
         reply = _close_turn_on_error(store, session_id, exc)
         await _safe_send(adapter, reply)

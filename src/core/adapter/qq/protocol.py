@@ -121,6 +121,8 @@ def parse_event(data: dict) -> Message | None:
         reply_to=None,
         ts=float(data.get("time") or 0),
         meta={"message_type": message_type, "self_id": data.get("self_id")},
+        # 群聊有别人在场，说话方式该不一样——模型需要知道（§十二）
+        session_type=message_type,
     )
 
 

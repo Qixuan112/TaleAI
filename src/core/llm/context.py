@@ -59,15 +59,26 @@ class ContextSpec:
     sources: list[tuple[str, int, int]] = field(default_factory=list)
 
 
+#: 会话类型 → 给模型看的中文。给中文而不是 group/private：
+#: 提示词其余部分全是中文，混英文词是噪音。更不写原始 ID——LLM 对长数字串
+#: 不友好、很难原样复述，而 M0 不需要它记住任何 ID（跨会话寻址是 M3 的
+#: §19-5 名称寻址，届时也走名字不走数字）。
+_SESSION_TYPE_LABELS = {"private": "私聊", "group": "群聊"}
+
+
 def _build_chat_env(session: SessionContext, now: datetime) -> ContextBlock:
-    """环境块：当前时间（M1 起再加会话环境等）。
+    """环境块：当前时间 + 会话类型（M1 起再加记忆摘要、未读等）。
 
     时间用「现在」是有意的——模型的知识截止到训练时，不给它当前时间，
     它会把"今天"理解成训练数据里的某一天。
+
+    会话类型是 M0-11 之后补上的：适配器落地后模型才有办法知道自己在哪种
+    会话里说话（群聊有别人在场，说话方式该不一样），但此前这根线没接上。
     """
     lines = [f"当前时间：{now.strftime('%Y-%m-%d %H:%M')}（星期{_WEEKDAYS[now.weekday()]}）"]
     if session.session_type:
-        lines.append(f"会话类型：{session.session_type}")
+        label = _SESSION_TYPE_LABELS.get(session.session_type, session.session_type)
+        lines.append(f"会话类型：{label}")
     return ContextBlock(name="chat_env", kind="dynamic", order=10, content="\n".join(lines))
 
 

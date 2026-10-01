@@ -65,9 +65,9 @@ def test_session_fields_optional():
     assert len(blocks) == 1
     assert "会话类型" not in blocks[0].content
 
-    # 给了 session_type 才出现
+    # 给了 session_type 才出现（渲染成中文，不给模型看 group/private 这种英文值）
     blocks2 = make_assembler().assemble("chat", SessionContext(session_type="group"))
-    assert "会话类型：group" in blocks2[0].content
+    assert "会话类型：群聊" in blocks2[0].content
 
 
 # ---------- 渲染 <system_reminder> ----------
