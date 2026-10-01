@@ -31,7 +31,9 @@ DOMAINS = {
 # 每个域对应的默认值来源（secrets 无默认，用空 dict）
 DEFAULT_SOURCES = {
     "config": DEFAULT_CONFIG,
-    "persona": {"format": "md", "version": "v1"},
+    # §14 定的取值是 text / markdown（"format 预留(text/markdown)"），
+    # 与 fields.py 的选项保持一致——两处写不同的值面板会对不上。
+    "persona": {"format": "markdown", "version": "v1"},
     "platforms": {},
     "plugins": {},
     "secrets": {},

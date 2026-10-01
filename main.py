@@ -12,6 +12,7 @@
 
 import asyncio
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -190,6 +191,27 @@ async def serve_forever(
 # ---------- 启动：组装依赖（§18.1 第 1~9 步） ----------
 
 
+def _resolve_ws_port() -> int:
+    """WebUI 端口：环境变量 > 配置 > 默认 8000。
+
+    为什么环境变量优先：联调/冒烟时常常要换个端口避开占用（8000 是很抢手的
+    端口，本机就撞过一次），命令行能覆盖就不必改配置文件。
+    """
+    env = os.environ.get("TALEAI_PORT")
+    if env:
+        try:
+            return int(env)
+        except ValueError:
+            logger.warning("TALEAI_PORT 不是数字：%r，改用配置值", env)
+    from core.config.loader import Config
+
+    try:
+        port = Config.load("platforms").get("websocket", {}).get("port")
+        return int(port) if port else 8000
+    except Exception:
+        return 8000
+
+
 def _build(bus: EventBus | None = None):
     """按 §18.1 组装出 (store, router, bot, bus, adapters)。"""
     bus = bus if bus is not None else EventBus()
@@ -202,7 +224,11 @@ def _build(bus: EventBus | None = None):
 
     # 第 8 步：适配器名册 + Router
     registry = AdapterRegistry()
-    ws_adapter = WebSocketAdapter(bus=bus)
+    # 注入读历史的回调：连上时补发历史，否则刷新页面后是空的（M0 验收⑤）。
+    # 用回调而不是把 store 塞给适配器——适配器不该认识 SessionStore（§22 import 单向）
+    ws_adapter = WebSocketAdapter(
+        bus=bus, port=_resolve_ws_port(), history_provider=store.history
+    )
     registry.register(ws_adapter)
     # QQ 是 M0-14，不阻塞主线；接入时在这里 register 即可，Router 自动认识
     router = Router(registry)

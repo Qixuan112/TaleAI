@@ -160,6 +160,71 @@ async def test_send_failure_on_broken_socket_is_swallowed():
     await a.send(Reply(session_id="s1", messages=["x"]))  # 不抛即通过
 
 
+# ---------- 重连时补发历史（M0 验收⑤：刷新后历史完整） ----------
+
+
+def test_connect_pushes_history_to_client():
+    """连上就把该会话的历史推给前端。
+
+    没有这一步，"刷新后历史完整"只是数据完整——用户看到的是空白页。
+    session_id 靠 localStorage 保住了、库里也有历史，但没人把它送到页面上。
+    """
+    a = WebSocketAdapter(history_provider=lambda sid: [
+        {"role": "user", "content": "你好"},
+        {"role": "assistant", "content": "哟，来啦~"},
+    ])
+    with TestClient(a.app).websocket_connect("/ws?session_id=web:local") as ws:
+        first = ws.receive_json()
+    assert first["type"] == "history"
+    assert first["messages"] == [
+        {"role": "user", "content": "你好"},
+        {"role": "assistant", "content": "哟，来啦~"},
+    ]
+
+
+def test_history_provider_is_asked_for_the_right_session():
+    asked = []
+
+    def provider(sid):
+        asked.append(sid)
+        return [{"role": "user", "content": "hi"}]
+
+    a = WebSocketAdapter(history_provider=provider)
+    with TestClient(a.app).websocket_connect("/ws?session_id=web:xyz") as ws:
+        ws.receive_json()  # 有历史才会推帧，这里等一下让它发出来
+    assert asked == ["web:xyz"]
+
+
+def test_empty_history_sends_no_frame():
+    """历史为空就不推帧——前端不会收到一个空的历史帧。"""
+    a = WebSocketAdapter(history_provider=lambda sid: [])
+    with TestClient(a.app).websocket_connect("/ws?session_id=s") as ws:
+        ws.send_json({"content": "在吗"})
+        import asyncio
+
+        assert asyncio.run(asyncio.wait_for(a.recv(), timeout=1)).content == "在吗"
+
+
+def test_no_history_provider_means_no_history_frame():
+    """没配 history_provider 时不发历史帧——保持零依赖可用（测试/裸连场景）。"""
+    a = WebSocketAdapter()
+    with TestClient(a.app).websocket_connect("/ws?session_id=x") as ws:
+        ws.send_json({"content": "在吗"})
+        # 下一条应该是收件箱里的消息，而不是历史帧
+        import asyncio
+
+        assert asyncio.run(asyncio.wait_for(a.recv(), timeout=1)).content == "在吗"
+
+
+def test_history_frame_is_not_a_chat_message():
+    """历史帧带 type=history，不能跟对话回复混——前端据此分流。"""
+    a = WebSocketAdapter(history_provider=lambda sid: [{"role": "user", "content": "hi"}])
+    with TestClient(a.app).websocket_connect("/ws?session_id=s") as ws:
+        frame = ws.receive_json()
+    assert frame["type"] == "history"
+    assert "tool_calls_made" not in frame
+
+
 # ---------- 静态页（M0-12 的挂钩，这里确认路由不挡 WS） ----------
 
 
