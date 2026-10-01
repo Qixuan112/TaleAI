@@ -165,6 +165,10 @@ def test_sessions_sorted_by_recent_activity(tmp_path):
     s = SessionStore(tmp_path / "s.db").open()
     s.ensure_session("old")
     s.append("old", "user", "x")
+    # 不能靠两次 ensure_session 之间的 time.time() 拉开差距：Windows 时钟粒度
+    # 约 15ms，两次调用可能拿到同一个 last_active，而 ORDER BY last_active DESC
+    # 对并列行不定义顺序——测试会随机失败。显式把 old 拨早。
+    s._db.execute("UPDATE sessions SET last_active = last_active - 10 WHERE id = 'old'")
     s.ensure_session("new")
     assert s.sessions()[0]["id"] == "new"
     s.close()

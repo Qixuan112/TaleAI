@@ -1,5 +1,6 @@
 """TaleAI 入口：点它就能跟初念聊上一句。"""
 
+import logging
 import sys
 from pathlib import Path
 
@@ -11,9 +12,30 @@ from core.log import Logging
 from core.plugin.registry import PluginRegistry
 from core.session.store import SessionStore
 
+logger = logging.getLogger(__name__)
+
 # 命令行会话固定在同一个 session_id 下——重启进程后读到的是同一条历史，
 # 这就是 M0 验收标准⑤「重启后历史完整」的兑现（§二十一）
 SESSION_ID = "cli:local"
+
+# 本轮失败时的占位回复。落库只为保住「1 回合 = 2 行」，内容是次要的。
+_FAILED_TURN_PLACEHOLDER = "……（初念这边出了点问题，你再试一次？）"
+
+
+def _close_turn_on_error(store: SessionStore, exc: Exception) -> None:
+    """对话轮失败时补一条占位 assistant 行，把这一回合收尾。
+
+    用户消息已经先落库了（收即存），若这轮就此中断，历史里会留下一条
+    单挂的 user 行——而弹簧窗口按「1 回合 = 2 行」计数（§18.1），
+    单挂会让回合计数错位。所以失败也要把这一路补平。
+    """
+    logger.exception("对话轮失败：%s", exc)
+    try:
+        store.append(SESSION_ID, "assistant", _FAILED_TURN_PLACEHOLDER)
+    except Exception:
+        # 连占位都写不进去（多半是库/磁盘坏了）——记日志就好，
+        # 绝不能在这里再炸一次，否则用户看到的是堆栈而非提示
+        logger.exception("补写占位 assistant 也失败")
 
 
 def main() -> None:
@@ -39,19 +61,34 @@ def main() -> None:
                 print("\n初念: 那我们就聊到这吧~ 下次见！")
                 break
 
-            # 带上历史去问初念（稳定前缀 + 会动尾巴），可能触发若干轮工具调用
-            reply = bot.chat(user_input, history, session_id=SESSION_ID)
+            # 收即存（§18.1 第 4 步）：用户消息**先落库**，崩溃不丢。
+            # 落库失败就没必要往下走——这轮干脆不发请求，免得用户以为发出去了。
+            try:
+                store.append(SESSION_ID, "user", user_input)
+            except Exception as exc:
+                logger.exception("用户消息落库失败")
+                print(f"\n  〔这条消息没存下来，这轮跳过：{exc}〕")
+                continue
 
-            # 收即存（§18.1 第 4/7 步）：两边都落库，崩溃不丢。
-            # 存的是**解析后**的话（不含 <msg> 标签）——它是这轮对话真实的内容。
-            store.append(SESSION_ID, "user", user_input)
-            store.append(
-                SESSION_ID,
-                "assistant",
-                "\n\n".join(reply.messages),
-                tool_json={"calls": reply.tool_calls_made,
-                           "stop_reason": reply.stop_reason} if reply.tool_calls_made else None,
-            )
+            # 带上**落库前**的 history 去问初念（history 是上一轮末尾刷新的）。
+            # 用户消息已进库，若在这里再取一次会把它读回来，装配时就重复发一遍
+            # （装配 = history + 最新提问）。所以传旧的 history。
+            try:
+                reply = bot.chat(user_input, history, session_id=SESSION_ID)
+                # assistant 真实消息落库；tool_json 一并存（§18.1 第 7 步）
+                store.append(
+                    SESSION_ID,
+                    "assistant",
+                    "\n\n".join(reply.messages),
+                    tool_json={"calls": reply.tool_calls_made,
+                               "stop_reason": reply.stop_reason} if reply.tool_calls_made else None,
+                )
+            except Exception as exc:
+                # 对话或落库失败：补平这一回合，别让 user 行单挂，然后继续下一轮
+                _close_turn_on_error(store, exc)
+                print(f"\n  〔初念这次没答上来：{exc}〕")
+                history = store.history(SESSION_ID)
+                continue
 
             # 让内存里的 history 跟库里保持一致，供下一轮装配用
             history = store.history(SESSION_ID)
@@ -68,3 +105,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

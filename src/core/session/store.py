@@ -83,13 +83,20 @@ class SessionStore:
             return self
         self.path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(self.path, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        # WAL：读写不互相阻塞，崩溃后可恢复（文档明确要求开了 WAL）
-        conn.execute("PRAGMA journal_mode=WAL")
-        # 外键约束默认关闭，messages.session_id 的 REFERENCES 要它才生效
-        conn.execute("PRAGMA foreign_keys=ON")
-        conn.executescript(_SCHEMA)
-        conn.commit()
+        # 建表中途任何一步失败（磁盘满、库损坏、PRAGMA 被拒），都必须把这条
+        # 连接关掉再抛——否则 self._conn 永远是 None，调用方既拿不到句柄、
+        # 也没有 close() 能关它，连接就泄漏到进程退出为止。
+        try:
+            conn.row_factory = sqlite3.Row
+            # WAL：读写不互相阻塞，崩溃后可恢复（文档明确要求开了 WAL）
+            conn.execute("PRAGMA journal_mode=WAL")
+            # 外键约束默认关闭，messages.session_id 的 REFERENCES 要它才生效
+            conn.execute("PRAGMA foreign_keys=ON")
+            conn.executescript(_SCHEMA)
+            conn.commit()
+        except Exception:
+            conn.close()
+            raise
         self._conn = conn
         return self
 
