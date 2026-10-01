@@ -31,8 +31,15 @@ DOMAINS = {
 # 每个域对应的默认值来源（secrets 无默认，用空 dict）
 DEFAULT_SOURCES = {
     "config": DEFAULT_CONFIG,
-    "persona": {"format": "md", "version": "v1"},
-    "platforms": {},
+    # §14 定的取值是 text / markdown（"format 预留(text/markdown)"），
+    # 与 fields.py 的选项保持一致——两处写不同的值面板会对不上。
+    "persona": {"format": "markdown", "version": "v1"},
+    # 平台开关。默认：WebUI 开、QQ 关（QQ 要另跑 SnowLuma 后端，
+    # 没配的人不该多起一个端口）。键名与 fields.py 的 platforms 域一致。
+    "platforms": {
+        "websocket": {"enabled": True, "port": 8000},
+        "qq": {"enabled": False, "host": "127.0.0.1", "port": 8866},
+    },
     "plugins": {},
     "secrets": {},
 }

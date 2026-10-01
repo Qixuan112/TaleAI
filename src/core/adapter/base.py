@@ -63,6 +63,13 @@ class Message:
     reply_to: str | None = None  # 引用回复的消息 ID（M0 为 None）
     ts: float = 0.0
     meta: dict[str, Any] = field(default_factory=dict)  # 平台私有字段，只透传
+    # 会话类型：private / group。与 sessions.kind（§18.3）同义。
+    #
+    # ⚠️ 对 §18.3 的补充（基线 Message 没有这个字段）：基线把 kind 放在
+    # sessions 表里，但装配提示词时需要它——模型得知道"这是群聊还是私聊"
+    # （群里有别人在场，说话方式不同）。适配器在 normalize 时就最清楚这一点，
+    # 让它顺手带上来，比事后从 session_id 前缀反推可靠（反推是猜，§19-5 精神）。
+    session_type: str = "private"
 
 
 class AdapterBase(ABC):

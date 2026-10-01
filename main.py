@@ -12,6 +12,7 @@
 
 import asyncio
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -23,6 +24,7 @@ from core.adapter.registry import AdapterRegistry
 from core.adapter.router import Router, UnknownPlatformError
 from core.bus.event_bus import EventBus
 from core.llm.chat_llm import ChatLLM
+from core.llm.persona_llm.base import USER_PERSONA_PATH, ensure_user_persona
 from core.log import Logging
 from core.plugin.registry import PluginRegistry
 from core.session.store import SessionStore
@@ -96,8 +98,11 @@ async def handle_message(
         return None
 
     # 会话行必须先存在（messages 有外键指过来）。幂等。
+    # kind 必须跟着消息走——此前漏传，导致群聊会话在库里被记成 private
+    # （与 §18.3 的 sessions.kind 定义不符）
     store.ensure_session(
-        session_id, platform=message.platform, owner=message.owner
+        session_id, platform=message.platform, owner=message.owner,
+        kind=message.session_type or "private",
     )
 
     # 第 4 步：收即存——**先读历史、再落库**。
@@ -111,9 +116,13 @@ async def handle_message(
         logger.exception("用户消息落库失败，跳过本轮")
         return None
 
-    # 第 5~6 步：装配 + FC 循环（装配在 run_loop 内部完成，§18.5 硬规则 6）
+    # 第 5~6 步：装配 + FC 循环（装配在 run_loop 内部完成，§18.5 硬规则 6）。
+    # 会话类型/owner 一路带给装配——模型据此知道自己在群聊还是私聊（§十二）
     try:
-        reply = await bot.run_loop(message.content, history, session_id)
+        reply = await bot.run_loop(
+            message.content, history, session_id,
+            session_type=message.session_type, owner=message.owner,
+        )
     except Exception as exc:
         reply = _close_turn_on_error(store, session_id, exc)
         await _safe_send(adapter, reply)
@@ -190,6 +199,41 @@ async def serve_forever(
 # ---------- 启动：组装依赖（§18.1 第 1~9 步） ----------
 
 
+def _resolve_ws_port() -> int:
+    """WebUI 端口：环境变量 > 配置 > 默认 8000。
+
+    为什么环境变量优先：联调/冒烟时常常要换个端口避开占用（8000 是很抢手的
+    端口，本机就撞过一次），命令行能覆盖就不必改配置文件。
+    """
+    env = os.environ.get("TALEAI_PORT")
+    if env:
+        try:
+            return int(env)
+        except ValueError:
+            logger.warning("TALEAI_PORT 不是数字：%r，改用配置值", env)
+    from core.config.loader import Config
+
+    try:
+        port = Config.load("platforms").get("websocket", {}).get("port")
+        return int(port) if port else 8000
+    except Exception:
+        return 8000
+
+
+def _qq_enabled() -> bool:
+    """QQ 是否启用：platforms.json 的 qq.enabled，默认 false。
+
+    默认关：QQ 要额外跑一个 SnowLuma 后端，没配的人不该多起一个端口、
+    更不该因为连不上而报错。要用的自己打开。
+    """
+    try:
+        from core.config.loader import Config
+
+        return bool(Config.load("platforms").get("qq", {}).get("enabled", False))
+    except Exception:
+        return False
+
+
 def _build(bus: EventBus | None = None):
     """按 §18.1 组装出 (store, router, bot, bus, adapters)。"""
     bus = bus if bus is not None else EventBus()
@@ -202,12 +246,26 @@ def _build(bus: EventBus | None = None):
 
     # 第 8 步：适配器名册 + Router
     registry = AdapterRegistry()
-    ws_adapter = WebSocketAdapter(bus=bus)
+    # 注入读历史的回调：连上时补发历史，否则刷新页面后是空的（M0 验收⑤）。
+    # 用回调而不是把 store 塞给适配器——适配器不该认识 SessionStore（§22 import 单向）
+    ws_adapter = WebSocketAdapter(
+        bus=bus, port=_resolve_ws_port(), history_provider=store.history
+    )
     registry.register(ws_adapter)
-    # QQ 是 M0-14，不阻塞主线；接入时在这里 register 即可，Router 自动认识
+    adapters = [ws_adapter]
+
+    # 第 8 步（续）：QQ（M0-14）。默认关，配置打开才接——Router 自动认识
+    if _qq_enabled():
+        from core.adapter.qq.adapter import QQAdapter
+
+        qq_adapter = QQAdapter(bus=bus)
+        registry.register(qq_adapter)
+        adapters.append(qq_adapter)
+        logger.info("QQ 适配器已启用（反向 WS，等 SnowLuma 连入）")
+
     router = Router(registry)
 
-    return store, router, bot, bus, [ws_adapter]
+    return store, router, bot, bus, adapters
 
 
 async def _serve() -> None:
@@ -290,6 +348,10 @@ def _run_cli(once: bool = False) -> None:
 
 def main() -> None:
     Logging.init()  # 启动第 2 步：日志落 data/logs/，按天轮转
+    # 第 1 步的一部分：人格文件不存在就从内置模板落一份到 data/config/，
+    # 用户第一次跑就有得改（§13：人格是用户的域）。幂等，绝不覆盖已改过的。
+    if ensure_user_persona():
+        logger.info("已从内置模板生成 %s（要改人设就改它，改完重启）", USER_PERSONA_PATH)
     argv = sys.argv[1:]
     if "--cli" in argv:
         _run_cli(once="--once" in argv)

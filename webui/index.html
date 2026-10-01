@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>塔利 · TaleAI</title>
+<style>
+  :root {
+    --bg: #f6f5f2;
+    --panel: #ffffff;
+    --ink: #2b2b2b;
+    --muted: #8a8a8a;
+    --tale: #6b7fd7;
+    --tale-soft: #eef0fb;
+    --me: #f0efe9;
+    --line: #e6e3dc;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font: 15px/1.6 "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    display: flex;
+    justify-content: center;
+  }
+  .app {
+    width: 100%;
+    max-width: 760px;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    background: var(--panel);
+    box-shadow: 0 0 40px rgba(0,0,0,.05);
+  }
+  header {
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--line);
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+  }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  header .status { font-size: 12px; color: var(--muted); }
+  header .status.ok::before { content: "● "; color: #5fbf7f; }
+  header .status.off::before { content: "● "; color: #d98b8b; }
+
+  #messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .row { display: flex; }
+  .row.me { justify-content: flex-end; }
+  .bubble {
+    max-width: 78%;
+    padding: 10px 14px;
+    border-radius: 14px;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .row.tale .bubble { background: var(--tale-soft); border-top-left-radius: 4px; }
+  .row.me .bubble { background: var(--me); border-top-right-radius: 4px; }
+  .meta { font-size: 11px; color: var(--muted); margin: 4px 2px 0; }
+  .tool-note {
+    align-self: center;
+    font-size: 12px;
+    color: var(--muted);
+    background: #faf9f6;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 2px 12px;
+  }
+
+  form {
+    display: flex;
+    gap: 10px;
+    padding: 14px 16px;
+    border-top: 1px solid var(--line);
+    background: var(--panel);
+  }
+  textarea {
+    flex: 1;
+    resize: none;
+    height: 46px;
+    padding: 12px 14px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    font: inherit;
+    color: inherit;
+    outline: none;
+  }
+  textarea:focus { border-color: var(--tale); }
+  button {
+    border: 0;
+    background: var(--tale);
+    color: #fff;
+    padding: 0 20px;
+    border-radius: 12px;
+    font: inherit;
+    cursor: pointer;
+  }
+  button:disabled { opacity: .5; cursor: default; }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <h1>塔利</h1>
+    <span id="status" class="status off">连接中…</span>
+  </header>
+
+  <div id="messages"></div>
+
+  <form id="composer">
+    <textarea id="input" placeholder="跟塔利说点什么…（Enter 发送，Shift+Enter 换行）" autofocus></textarea>
+    <button id="send" type="submit">发送</button>
+  </form>
+</div>
+
+<script>
+// ---- 会话 ID：存 localStorage -------------------------------------------------
+// 刷新页面会重连，带上同一个 session_id，历史才接得上（M0 验收⑤）。
+function sessionId() {
+  var k = "taleai.session_id";
+  var v = localStorage.getItem(k);
+  if (!v) {
+    v = "web:" + (crypto.randomUUID ? crypto.randomUUID().slice(0, 8)
+                                     : Math.random().toString(36).slice(2, 10));
+    localStorage.setItem(k, v);
+  }
+  return v;
+}
+var SID = sessionId();
+
+// ---- DOM ---------------------------------------------------------------------
+var messagesEl = document.getElementById("messages");
+var formEl = document.getElementById("composer");
+var inputEl = document.getElementById("input");
+var sendEl = document.getElementById("send");
+var statusEl = document.getElementById("status");
+
+function setStatus(text, ok) {
+  statusEl.textContent = text;
+  statusEl.className = "status " + (ok ? "ok" : "off");
+}
+
+// 一律用 textContent——绝不把内容塞 innerHTML，否则是 XSS 口子。
+function addBubble(text, who) {
+  var row = document.createElement("div");
+  row.className = "row " + who;
+  var bubble = document.createElement("div");
+  bubble.className = "bubble";
+  bubble.textContent = text;
+  row.appendChild(bubble);
+  messagesEl.appendChild(row);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+  return bubble;
+}
+
+function addToolNote(count) {
+  var note = document.createElement("div");
+  note.className = "tool-note";
+  note.textContent = "〔塔利调用了 " + count + " 次工具〕";
+  messagesEl.appendChild(note);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+// ---- WebSocket ---------------------------------------------------------------
+var ws = null;
+var pending = null;   // 等待回复时占位的那条气泡
+
+function connect() {
+  var proto = location.protocol === "https:" ? "wss:" : "ws:";
+  ws = new WebSocket(proto + "//" + location.host + "/ws?session_id=" + encodeURIComponent(SID));
+
+  ws.onopen = function () {
+    setStatus("已连接", true);
+    sendEl.disabled = false;
+  };
+  ws.onclose = function () {
+    setStatus("已断开，重连中…", false);
+    sendEl.disabled = true;
+    setTimeout(connect, 1500);   // 断线自动重连
+  };
+  ws.onerror = function () { setStatus("连接出错", false); };
+
+  ws.onmessage = function (ev) {
+    var data = JSON.parse(ev.data);
+
+    // 历史帧：连上时服务端补发的旧消息，一次性渲染（刷新后历史完整的关键）
+    if (data.type === "history") {
+      messagesEl.innerHTML = "";
+      (data.messages || []).forEach(function (m) {
+        addBubble(m.content, m.role === "user" ? "me" : "tale");
+      });
+      return;
+    }
+
+    // 每条 <msg> 单独一个气泡——模型可能分几句说
+    (data.messages || []).forEach(function (m) { addBubble(m, "tale"); });
+    if (data.tool_calls_made > 0) addToolNote(data.tool_calls_made);
+    if (data.stop_reason && data.stop_reason !== "ok") {
+      var meta = document.createElement("div");
+      meta.className = "meta";
+      meta.textContent = "（结束原因：" + data.stop_reason + "）";
+      messagesEl.appendChild(meta);
+    }
+    if (pending) { pending.remove(); pending = null; }
+    sendEl.disabled = false;
+    inputEl.focus();
+  };
+}
+
+// ---- 发送 --------------------------------------------------------------------
+function send() {
+  var text = inputEl.value.trim();
+  if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
+  addBubble(text, "me");
+  ws.send(JSON.stringify({ content: text, session_id: SID }));
+  inputEl.value = "";
+  sendEl.disabled = true;
+  pending = addBubble("塔利在想…", "tale");
+  pending.classList.add("thinking");
+}
+
+formEl.addEventListener("submit", function (e) {
+  e.preventDefault();
+  send();
+});
+
+// Enter 发送，Shift+Enter 换行
+inputEl.addEventListener("keydown", function (e) {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    send();
+  }
+});
+
+connect();
+</script>
+</body>
+</html>

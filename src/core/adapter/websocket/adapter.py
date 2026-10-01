@@ -21,6 +21,7 @@ import logging
 import time
 import uuid
 from pathlib import Path
+from typing import Callable
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import RedirectResponse
@@ -50,10 +51,15 @@ class WebSocketAdapter(AdapterBase):
         *,
         host: str = "127.0.0.1",
         port: int = 8000,
+        history_provider: Callable[[str], list[dict]] | None = None,
     ) -> None:
         super().__init__(bus=bus)
         self.host = host
         self.port = port
+        # 读历史的回调（session_id → [{role, content}]）。由 main 注入 store.history。
+        # 为什么用回调而不是直接传 store：适配器不该认识 SessionStore（§22 import 单向）。
+        # 不注入就退化成"连上不补历史"——测试/裸连能用。
+        self._history_provider = history_provider
         # session_id → 连接。同会话重连覆盖旧连接（后连的说了算）
         self._connections: dict[str, WebSocket] = {}
         self.app = self._build_app()
@@ -109,6 +115,26 @@ class WebSocketAdapter(AdapterBase):
 
     # ---------- FastAPI 应用 ----------
 
+    async def _push_history(self, websocket: WebSocket, session_id: str) -> None:
+        """连上时补发该会话的历史。
+
+        这是一个独立帧（type=history），跟对话回复分开——前端据此把历史一次
+        渲染成气泡，不用跟后续回复抢消息顺序。没有 provider 就跳过。
+        """
+        if self._history_provider is None:
+            return
+        try:
+            history = self._history_provider(session_id)
+        except Exception:
+            logger.exception("读历史失败：session=%s", session_id)
+            return
+        if not history:
+            return
+        try:
+            await websocket.send_json({"type": "history", "messages": history})
+        except Exception:
+            logger.warning("补发历史失败：session=%s", session_id, exc_info=True)
+
     def _build_app(self) -> FastAPI:
         app = FastAPI(title="TaleAI WebUI")
 
@@ -119,6 +145,8 @@ class WebSocketAdapter(AdapterBase):
             session_id = websocket.query_params.get("session_id") or DEFAULT_SESSION_ID
             self._connections[session_id] = websocket
             logger.info("WebUI 已连接：session=%s", session_id)
+            # 先把该会话的历史推过去——否则刷新后页面是空的（M0 验收⑤）
+            await self._push_history(websocket, session_id)
             try:
                 while True:
                     raw = await websocket.receive_json()

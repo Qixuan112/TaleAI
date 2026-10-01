@@ -22,7 +22,7 @@ from openai import AsyncOpenAI
 from core.adapter.base import Reply
 from core.config.loader import Config
 from core.executor import ToolCall, ToolExecutor
-from core.llm.context import ContextAssembler
+from core.llm.context import ContextAssembler, SessionContext
 from core.llm.persona_llm.base import Persona
 from core.plugin.registry import PluginRegistry
 from core.xml_parser import ParsedOutput, XmlParser
@@ -115,16 +115,20 @@ class ChatLLM:
         self.fallback_text = _load_fallback_text()
 
     def assemble_messages(
-        self, user_question: str, history: list[dict[str, str]] | None = None
+        self, user_question: str, history: list[dict[str, str]] | None = None,
+        session: "SessionContext | None" = None,
     ) -> list[dict[str, str]]:
         """装配：稳定前缀（人格 system）+ 会动尾巴（历史 + 最新提问）。
 
-        动态块（M0 只有环境块=当前时间）拼到**最新 user 消息头部**，
-        用 <system_reminder> 包裹（§十二）。
+        动态块（时间 + 会话类型）拼到**最新 user 消息头部**，用
+        <system_reminder> 包裹（§十二）。
 
         关键：reminder 只进本次请求，**不写回 history**（persist=False）。
         否则每轮都往历史里塞一份时间戳，上下文会越滚越大。
         history 是调用方的 list，这里绝不改它。
+
+        session 是可缺省的——命令行/单测不带会话信息时，装配出来就只有时间，
+        没有噪音（M0-11 之前就是这个行为，保持兼容）。
         """
         messages: list[dict[str, str]] = [
             {"role": "system", "content": self.persona.build_system_prompt()},  # 稳定 → 前缀
@@ -136,7 +140,7 @@ class ChatLLM:
             messages.extend(trimmed)
 
         # 动态块包在 <system_reminder> 里，贴在最新提问前面
-        reminder = self.context.render_reminder(self.context.assemble("chat"))
+        reminder = self.context.render_reminder(self.context.assemble("chat", session))
         content = f"{reminder}\n{user_question}" if reminder else user_question
 
         # 最新提问放在最末尾（会动部分）
@@ -225,11 +229,15 @@ class ChatLLM:
 
     async def run_loop(
         self, user_question: str, history: list[dict[str, str]] | None = None,
-        session_id: str = "",
+        session_id: str = "", *, session_type: str = "", owner: str = "",
     ) -> Reply:
         """FC 循环（§18.1 第 6 步）：最多 max_agent_steps 轮。
 
         每轮：调模型 → 摘出 <msg> → 有工具调用就执行并回喂 → 没有就收工。
+
+        session_type / owner 由调用方（前台循环）从 Message 里带过来，构成
+        SessionContext 交给装配——模型据此知道自己在群聊还是私聊（§十二）。
+        不传也能跑，只是模型看不到会话类型（命令行/单测如此）。
 
         ⚠️ 与 §19-2 的偏离（实测逼出来的）：文档写「每轮必须先产出 <msg>
         才允许携带 FC」，但真实模型第一轮就是**纯工具调用、content 为 None**
@@ -239,7 +247,10 @@ class ChatLLM:
         并在最终一句都没有时发兜底文案——保住了 §19-2 的意图（不让用户
         面对空白、不让循环失控），又不跟模型的原生行为对着干。
         """
-        messages = self.assemble_messages(user_question, history)
+        session = SessionContext(
+            session_id=session_id, session_type=session_type, owner=owner
+        )
+        messages = self.assemble_messages(user_question, history, session=session)
         tools = self.registry.tool_schemas()
 
         collected: list[str] = []
@@ -289,7 +300,8 @@ class ChatLLM:
 
     def chat(
         self, session_id: str, user_question: str,
-        history: list[dict[str, str]] | None = None,
+        history: list[dict[str, str]] | None = None, *,
+        session_type: str = "", owner: str = "",
     ) -> Reply:
         """同步入口：说一句话，拿回一次对话的完整结果（Reply，§18.3）。
 
@@ -300,4 +312,7 @@ class ChatLLM:
         注意：这是**同步**入口，内部 asyncio.run。前台循环（已在事件循环里）
         必须 await `run_loop()`，不能调这个——在运行中的循环里再 run 会报错。
         """
-        return asyncio.run(self.run_loop(user_question, history, session_id))
+        return asyncio.run(self.run_loop(
+            user_question, history, session_id,
+            session_type=session_type, owner=owner,
+        ))
