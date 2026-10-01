@@ -133,14 +133,46 @@ async def test_send_group_reply_uses_group_action():
     assert link.sent[0]["params"]["group_id"] == 30003000
 
 
-async def test_send_joins_multiple_messages():
-    """Reply.messages 可能多条，合并成一条发出去（QQ 没有分气泡的概念）。"""
+async def test_send_splits_multiple_messages_into_separate_actions():
+    """多条 <msg> 应当分条发出去，不是拼成一大段。
+
+    QQ 没有"气泡"概念，但**可以发多条消息**——每条一个动作。拼成一段会让
+    塔利"先应一声、再答正文"这种节奏没了（WebUI 里是分开气泡，QQ 该一致）。
+    """
     a = QQAdapter()
     link = FakeLink()
     a._link = link
     await a.send(Reply(session_id="qq:p1", messages=["第一句", "第二句"]))
-    text = link.sent[0]["params"]["message"][0]["data"]["text"]
-    assert "第一句" in text and "第二句" in text
+    assert len(link.sent) == 2
+    texts = [x["params"]["message"][0]["data"]["text"] for x in link.sent]
+    assert texts == ["第一句", "第二句"]
+
+
+async def test_split_sends_keep_order_and_target():
+    a = QQAdapter()
+    link = FakeLink()
+    a._link = link
+    await a.send(Reply(session_id="qq:g30003000", messages=["一", "二", "三"]))
+    assert [x["params"]["message"][0]["data"]["text"] for x in link.sent] == ["一", "二", "三"]
+    assert all(x["action"] == "send_group_msg" for x in link.sent)
+    assert all(x["params"]["group_id"] == 30003000 for x in link.sent)
+
+
+async def test_blank_messages_are_skipped_when_splitting():
+    """空的 <msg> 不该发出去——白气泡很突兀。"""
+    a = QQAdapter()
+    link = FakeLink()
+    a._link = link
+    await a.send(Reply(session_id="qq:p1", messages=["有内容", "", "  ", "也有"]))
+    assert len(link.sent) == 2
+
+
+async def test_single_message_still_one_action():
+    a = QQAdapter()
+    link = FakeLink()
+    a._link = link
+    await a.send(Reply(session_id="qq:p1", messages=["就一句"]))
+    assert len(link.sent) == 1
 
 
 async def test_send_without_connection_is_skipped_not_raised():

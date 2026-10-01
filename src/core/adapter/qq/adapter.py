@@ -20,6 +20,7 @@ SnowLuma 负责（它的 `reconnectIntervalMs`）。少一半代码。
 
 import asyncio
 import logging
+import uuid
 from collections import OrderedDict
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -33,6 +34,9 @@ logger.addHandler(logging.NullHandler())
 
 #: 去重窗口：平台重发（断线重连）会带同一个 message_id
 _DEDUP_MAX = 1000
+
+#: 分条发送之间的停顿（秒）。太短客户端会合并/乱序，太长显得卡。
+_SPLIT_DELAY_SEC = 0.6
 
 
 class QQAdapter(AdapterBase):
@@ -67,23 +71,41 @@ class QQAdapter(AdapterBase):
         return parse_event(raw)
 
     async def send(self, reply: Reply) -> None:
-        """把一次对话结果发回 QQ。多条消息合并成一条。"""
+        """把一次对话结果发回 QQ：**每条 <msg> 分开发**。
+
+        为什么不拼成一段：塔利一次可能分两句（先应一声、再答正文），WebUI 里
+        是分开的气泡。QQ 虽然没有"气泡"概念，但能连发多条消息——拼成一段会
+        把这个节奏压没，两边体验不一致。
+
+        条与条之间隔一小会儿：不隔的话多条消息几乎同时到达，客户端可能合并、
+        顺序也可能乱。人说话本来就有停顿，这个延迟也更自然。
+        """
         if self._link is None:
             logger.warning("QQ 未连接，丢弃这条回复：session=%s", reply.session_id)
             return
 
-        text = "\n".join(m for m in reply.messages if m)
-        if not text:
-            return
-        try:
-            action, params = build_send_action(reply.session_id, text)
-        except ValueError:
-            logger.warning("会话 ID 不是 QQ 的，发不出去：%r", reply.session_id)
+        # 空 <msg> 跳过——白气泡很突兀
+        parts = [m for m in reply.messages if m and m.strip()]
+        if not parts:
             return
 
+        for i, text in enumerate(parts):
+            if i:
+                await asyncio.sleep(_SPLIT_DELAY_SEC)
+            await self._send_one(reply.session_id, text)
+
+    async def _send_one(self, session_id: str, text: str) -> None:
+        """发一条消息。任何失败只记日志，不抛——发不出去不该炸掉处理链。"""
         try:
-            await self._link.send_json({"action": action, "params": params,
-                                        "echo": f"send-{reply.session_id}"})
+            action, params = build_send_action(session_id, text)
+        except ValueError:
+            logger.warning("会话 ID 不是 QQ 的，发不出去：%r", session_id)
+            return
+        try:
+            await self._link.send_json({
+                "action": action, "params": params,
+                "echo": f"send-{session_id}-{uuid.uuid4().hex[:6]}",
+            })
         except Exception:
             logger.warning("向 QQ 发送失败，连接可能已断", exc_info=True)
 
