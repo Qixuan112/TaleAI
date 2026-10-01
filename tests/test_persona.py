@@ -28,8 +28,8 @@ def test_different_instances_identical():
 
 
 def test_system_prompt_contains_static_blocks():
-    """静态块内容齐全：人格（初念）+ 占位符（<msg>）。"""
+    """静态块内容齐全：人格（塔利）+ 占位符（<msg>）。"""
     p = Persona()
     prompt = p.build_system_prompt()
-    assert "初念" in prompt
+    assert "塔利" in prompt
     assert "<msg>" in prompt

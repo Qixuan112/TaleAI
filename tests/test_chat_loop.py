@@ -101,7 +101,7 @@ def make_bot(script, **overrides):
 def test_plain_reply_without_tools():
     """模型直接说话，不调工具。"""
     bot = make_bot([assistant("<msg>你好呀~</msg>")])
-    reply = bot.chat("你好")
+    reply = bot.chat("", "你好")
     assert reply.messages == ["你好呀~"]
     assert reply.tool_calls_made == 0
     assert reply.stop_reason == "ok"
@@ -109,7 +109,7 @@ def test_plain_reply_without_tools():
 
 def test_multiple_msg_in_one_round():
     bot = make_bot([assistant("<msg>第一句</msg>\n\n<msg>第二句</msg>")])
-    reply = bot.chat("说吧")
+    reply = bot.chat("", "说吧")
     assert reply.messages == ["第一句", "第二句"]
 
 
@@ -119,7 +119,7 @@ def test_tool_call_then_reply():
         assistant("<msg>我查查~</msg>", [tool_call("c1", "ping", "{}")]),
         assistant("<msg>pong，通了</msg>"),
     ])
-    reply = bot.chat("测试一下连通性")
+    reply = bot.chat("", "测试一下连通性")
     assert reply.messages == ["我查查~", "pong，通了"]
     assert reply.tool_calls_made == 1
     assert reply.stop_reason == "ok"
@@ -131,7 +131,7 @@ def test_tool_result_is_fed_back():
         assistant(None, [tool_call("c1", "ping", "{}")]),
         assistant("<msg>收到</msg>"),
     ])
-    bot.chat("测试")
+    bot.chat("", "测试")
     second_request = bot.client.requests[1]
     tool_msgs = tool_messages(second_request)
     assert len(tool_msgs) == 1
@@ -141,7 +141,7 @@ def test_tool_result_is_fed_back():
 
 def test_tools_are_passed_to_api():
     bot = make_bot([assistant("<msg>hi</msg>")])
-    bot.chat("hi")
+    bot.chat("", "hi")
     sent = bot.client.requests[0]["tools"]
     names = {t["function"]["name"] for t in sent}
     assert {"ping", "time_query"} <= names
@@ -153,7 +153,7 @@ def test_tool_error_is_fed_back_for_correction():
         assistant(None, [tool_call("c1", "不存在的工具", "{}")]),
         assistant("<msg>抱歉，我没这个能力</msg>"),
     ])
-    reply = bot.chat("干点什么")
+    reply = bot.chat("", "干点什么")
     tool_msg = tool_messages(bot.client.requests[1])[0]
     payload = json.loads(tool_msg["content"])
     assert "error" in payload
@@ -166,7 +166,7 @@ def test_malformed_arguments_reported_not_crash():
         assistant(None, [tool_call("c1", "ping", "{不是JSON")]),
         assistant("<msg>我再试试</msg>"),
     ])
-    reply = bot.chat("测试")
+    reply = bot.chat("", "测试")
     tool_msg = tool_messages(bot.client.requests[1])[0]
     assert "合法 JSON" in json.loads(tool_msg["content"])["error"]
     assert reply.stop_reason == "ok"
@@ -182,7 +182,7 @@ def test_same_tool_same_args_cuts_loop():
         assistant(None, [tool_call("c2", "ping", "{}")]),  # 与上轮完全一致
         assistant("<msg>不该走到这里</msg>"),
     ])
-    reply = bot.chat("测试")
+    reply = bot.chat("", "测试")
     assert reply.stop_reason == "loop_cut"
     assert reply.tool_calls_made == 1  # 第二次没执行
     assert len(bot.client.requests) == 2
@@ -194,7 +194,7 @@ def test_signature_ignores_whitespace_and_key_order():
         assistant(None, [tool_call("c1", "time_query", '{"tz": "UTC"}')]),
         assistant(None, [tool_call("c2", "time_query", '{ "tz" : "UTC" }')]),
     ])
-    reply = bot.chat("几点了")
+    reply = bot.chat("", "几点了")
     assert reply.stop_reason == "loop_cut"
 
 
@@ -205,7 +205,7 @@ def test_different_args_do_not_cut():
         assistant(None, [tool_call("c2", "time_query", '{"tz": "Asia/Tokyo"}')]),
         assistant(None, [tool_call("c3", "time_query", '{"tz": "Asia/Seoul"}')]),
     ])
-    reply = bot.chat("各地时间")
+    reply = bot.chat("", "各地时间")
     assert reply.stop_reason == "max_steps"
     assert reply.tool_calls_made == 3
 
@@ -217,7 +217,7 @@ def test_respects_max_agent_steps():
     script = [assistant(None, [tool_call(f"c{i}", "time_query", f'{{"tz": "UTC{i}"}}')])
               for i in range(5)]
     bot = make_bot(script, max_agent_steps=3)
-    reply = bot.chat("一直查")
+    reply = bot.chat("", "一直查")
     assert len(bot.client.requests) == 3
     assert reply.stop_reason == "max_steps"
 
@@ -231,7 +231,7 @@ def test_no_message_at_all_uses_fallback_text():
         assistant(None, [tool_call("c1", "ping", "{}")]),
         assistant(None),
     ])
-    reply = bot.chat("测试")
+    reply = bot.chat("", "测试")
     assert reply.messages == ["（兜底）"]
     assert reply.stop_reason == "parse_fallback"
 
@@ -239,7 +239,7 @@ def test_no_message_at_all_uses_fallback_text():
 def test_plain_text_without_msg_still_shown():
     """模型没打标签但说了话 → 原文照给（XmlParser 的兜底），不是空白。"""
     bot = make_bot([assistant("我没打标签就直接说了")])
-    reply = bot.chat("在吗")
+    reply = bot.chat("", "在吗")
     assert reply.messages == ["我没打标签就直接说了"]
 
 
@@ -251,7 +251,7 @@ def test_dynamic_reminder_not_in_history():
     bot = make_bot([assistant("<msg>好</msg>")])
     history = [{"role": "user", "content": "早"}]
     snapshot = [dict(m) for m in history]
-    bot.chat("现在几点", history)
+    bot.chat("", "现在几点", history)
     assert history == snapshot
     sent = bot.client.requests[0]["messages"]
     assert "system_reminder" in sent[-1]["content"]
@@ -260,10 +260,10 @@ def test_dynamic_reminder_not_in_history():
 
 def test_session_id_carried_into_reply():
     bot = make_bot([assistant("<msg>好</msg>")])
-    assert bot.chat("hi", session_id="cli").session_id == "cli"
+    assert bot.chat("cli", "hi").session_id == "cli"
 
 
 def test_reply_is_reply_object():
     from core.adapter.base import Reply
     bot = make_bot([assistant("<msg>好</msg>")])
-    assert isinstance(bot.chat("hi"), Reply)
+    assert isinstance(bot.chat("", "hi"), Reply)

@@ -5,7 +5,9 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "fastapi>=0.142.2",
     "openai>=3.3.1",
+    "uvicorn[standard]>=0.54.0",
 ]
 
 [dependency-groups]
@@ -13,3 +15,9 @@ dev = [
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
 ]
+
+[tool.pytest.ini_options]
+# M0-11 起有 async 测试（适配器/前台循环）。auto 模式下 async def test_* 自动跑，
+# 不必每个都挂 @pytest.mark.asyncio。
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"

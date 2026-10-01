@@ -21,7 +21,7 @@ DEFAULT_CONFIG = {
     },
     # 角色配置
     "bot": {
-        "name": "初念",
+        "name": "塔利",
     },
     # 平台接入（M0 留空即可，YAGNI）
     "platforms": {},

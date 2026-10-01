@@ -1,0 +1,169 @@
+"""WebSocket 适配器：WebUI 接入（设计文档 §1.6 / §18.1 / §22）。
+
+用 FastAPI 起服务（文档 §1.6 的 WebUI 演进方向；M0 就一步到位，省得以后迁）。
+本模块只做"接入"这件事：收 WebUI 的原始数据 → 归一成 `Message`；
+收 `Reply` → 发回对应连接。它不认识 ChatLLM，也不认识工具（§22 import 单向）。
+
+**会话 ID 为什么由客户端给**：WebUI 一旦刷新就断连重连，若每次连接都新分配
+一个 session_id，历史就跟着断了——而"M0 验收⑤：重启后历史完整"正要求它在
+重连后还认得同一个会话。所以 session_id 走查询参数（`/ws?session_id=web:local`），
+默认值保证裸连也能用。这和 QQ 用"对方 ID"、CLI 用固定串是同一种做法：
+**稳定 ID 由平台侧决定，适配器负责把它带进 Message**。
+
+连接表放在适配器里（session_id → WebSocket）：`send(reply)` 只拿得到
+`Reply.session_id`，得靠它反查该往哪条连接发。同会话重连 = 覆盖旧连接，
+最后一条连接为准。
+"""
+
+import asyncio
+import json
+import logging
+import time
+import uuid
+from pathlib import Path
+
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
+
+from core.adapter.base import AdapterBase, Message, Reply
+from core.bus.event_bus import EventBus
+
+logger = logging.getLogger(__name__)
+logger.addHandler(logging.NullHandler())
+
+# webui/ 在项目根下（src/core/adapter/websocket/ → parents[4]）
+WEBUI_DIR = Path(__file__).resolve().parents[4] / "webui"
+
+# 没带 session_id 时的默认会话——裸连（比如直接 ws 客户端测试）也能用
+DEFAULT_SESSION_ID = "web:local"
+
+
+class WebSocketAdapter(AdapterBase):
+    """WebUI 的 WebSocket 接入。"""
+
+    name = "websocket"
+
+    def __init__(
+        self,
+        bus: EventBus | None = None,
+        *,
+        host: str = "127.0.0.1",
+        port: int = 8000,
+    ) -> None:
+        super().__init__(bus=bus)
+        self.host = host
+        self.port = port
+        # session_id → 连接。同会话重连覆盖旧连接（后连的说了算）
+        self._connections: dict[str, WebSocket] = {}
+        self.app = self._build_app()
+
+    # ---------- 归一：原始数据 → Message ----------
+
+    def normalize(self, raw: dict) -> Message:
+        """把 WebUI 发来的 JSON 归一成 Message。
+
+        期望形状：`{"content": "说了什么", "session_id": "web:local"}`。
+        session_id 缺省用默认值；id / ts 服务端生成（客户端不该操心全局唯一性）。
+        """
+        content = str(raw.get("content", "")).strip()
+        session_id = str(raw.get("session_id") or DEFAULT_SESSION_ID)
+
+        return Message(
+            id=uuid.uuid4().hex,
+            platform=self.name,
+            session_id=session_id,
+            # WebUI 是本人单机使用，owner 固定 local（记忆隔离维度，§十八-4）
+            owner=str(raw.get("owner") or "local"),
+            direction="in",
+            role="user",
+            content=content,
+            ts=time.time(),
+            meta={},
+        )
+
+    # ---------- 发：Reply → 连接 ----------
+
+    async def send(self, reply: Reply) -> None:
+        """把一次对话结果发回该会话的那条连接。
+
+        会话已断开（连接表里没有）→ 记日志跳过，不抛：用户可能刚关了页面，
+        这是正常情况，不该让前台循环崩在"发不出去"上。
+        """
+        socket = self._connections.get(reply.session_id)
+        if socket is None:
+            logger.warning("会话 %r 已断开，丢弃这条回复", reply.session_id)
+            return
+
+        payload = {
+            "session_id": reply.session_id,
+            "messages": reply.messages,
+            "tool_calls_made": reply.tool_calls_made,
+            "stop_reason": reply.stop_reason,
+        }
+        try:
+            await socket.send_json(payload)
+        except Exception:
+            # 连接可能刚好在这一刻断掉（发送时才暴露）——不是程序错误
+            logger.warning("向会话 %r 发送失败，连接可能已断", reply.session_id, exc_info=True)
+
+    # ---------- FastAPI 应用 ----------
+
+    def _build_app(self) -> FastAPI:
+        app = FastAPI(title="TaleAI WebUI")
+
+        @app.websocket("/ws")
+        async def ws_endpoint(websocket: WebSocket) -> None:
+            await websocket.accept()
+            # 会话 ID 从查询参数取；刷新页面重连会带同一个 ID，历史接得上
+            session_id = websocket.query_params.get("session_id") or DEFAULT_SESSION_ID
+            self._connections[session_id] = websocket
+            logger.info("WebUI 已连接：session=%s", session_id)
+            try:
+                while True:
+                    raw = await websocket.receive_json()
+                    message = self.normalize({**raw, "session_id": session_id})
+                    if not message.content:
+                        continue  # 空消息不发请求（跟 CLI 的空行一致）
+                    self._deliver(message)
+            except WebSocketDisconnect:
+                pass
+            except Exception:
+                logger.exception("WebSocket 连接处理出错：session=%s", session_id)
+            finally:
+                # 只在"当前这条连接"仍是登记的那条时才清理——避免把重连后的
+                # 新连接误删（旧连接断开事件可能晚于新连接的登记）
+                if self._connections.get(session_id) is websocket:
+                    self._connections.pop(session_id, None)
+                logger.info("WebUI 已断开：session=%s", session_id)
+
+        # 静态聊天页。挂到 / 下；webui/index.html 就是入口（M0-12）。
+        if WEBUI_DIR.is_dir():
+            @app.get("/")
+            async def index() -> RedirectResponse:
+                return RedirectResponse("/static/index.html")
+
+            app.mount("/static", StaticFiles(directory=str(WEBUI_DIR)), name="static")
+
+        return app
+
+    # ---------- 起服务 ----------
+
+    async def start(self) -> None:
+        """跑 uvicorn（阻塞到进程结束）。由 main 用 create_task 挂成常驻任务。"""
+        import uvicorn
+
+        config = uvicorn.Config(
+            self.app, host=self.host, port=self.port, log_level="warning"
+        )
+        server = uvicorn.Server(config)
+        logger.info("WebSocket 适配器监听 ws://%s:%d/ws", self.host, self.port)
+        await server.serve()
+
+    # ---------- 排障辅助 ----------
+
+    def connected_sessions(self) -> list[str]:
+        return list(self._connections)
+
+
+__all__ = ["WebSocketAdapter", "DEFAULT_SESSION_ID"]

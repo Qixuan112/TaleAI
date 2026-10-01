@@ -21,7 +21,10 @@ jobs:
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          pip install pytest pytest-asyncio openai
+          # 依赖从 pyproject.toml 装，单一来源——避免这里手写的清单
+          # 与项目依赖脱节（M0-11 加了 fastapi/uvicorn，硬编码清单会漏）
+          pip install -e .
+          pip install pytest pytest-asyncio
 
       - name: Run tests
         run: |

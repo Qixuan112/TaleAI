@@ -33,10 +33,10 @@ def test_default_llm_config_shape():
 
 
 def test_default_bot_name():
-    """bot 配置里有名字,默认叫 初念。"""
+    """bot 配置里有名字,默认叫 塔利。"""
     from core.config.default import DEFAULT_CONFIG
 
-    assert DEFAULT_CONFIG["bot"]["name"] == "初念"
+    assert DEFAULT_CONFIG["bot"]["name"] == "塔利"
 
 
 def test_load_config_returns_defaults_when_no_file(tmp_path):
@@ -45,7 +45,7 @@ def test_load_config_returns_defaults_when_no_file(tmp_path):
 
     path = tmp_path / "config.json"
     cfg = Config.load("config", path=path)
-    assert cfg.get("bot", {}).get("name") == "初念"
+    assert cfg.get("bot", {}).get("name") == "塔利"
     assert isinstance(cfg.get("llm", {}).get("api_keys"), list)
 
 
