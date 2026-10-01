@@ -167,3 +167,105 @@ async def test_send_failure_swallowed():
     a = QQAdapter()
     a._link = BadLink()
     await a.send(Reply(session_id="qq:p1", messages=["x"]))  # 不抛即通过
+
+
+# ---------- 群聊过滤：只回 @（避免在活跃群里刷屏） ----------
+
+
+def group_event_at(bot_id=10001, user_id=20002000, text=" 塔利在吗"):
+    """群里 @ 了机器人的消息。"""
+    return {
+        "time": 1720000000, "self_id": bot_id,
+        "post_type": "message", "message_type": "group", "sub_type": "normal",
+        "message_id": 555, "group_id": 30003000, "user_id": user_id,
+        "anonymous": None, "font": 0,
+        "message": [{"type": "at", "data": {"qq": str(bot_id)}},
+                    {"type": "text", "data": {"text": text}}],
+        "sender": {"user_id": user_id, "nickname": "老板", "card": "老板", "role": "member"},
+    }
+
+
+def group_event_plain(user_id=20002000, text="今天天气不错"):
+    """群里没 @ 机器人的普通消息。"""
+    return {
+        "time": 1720000000, "self_id": 10001,
+        "post_type": "message", "message_type": "group", "sub_type": "normal",
+        "message_id": 556, "group_id": 30003000, "user_id": user_id,
+        "anonymous": None, "font": 0,
+        "message": [{"type": "text", "data": {"text": text}}],
+        "sender": {"user_id": user_id, "nickname": "老板", "card": "老板", "role": "member"},
+    }
+
+
+def test_group_message_without_at_is_ignored():
+    """群聊没 @ 机器人 → 不响应。否则在活跃群里会疯狂刷屏 + 烧钱。"""
+    a = QQAdapter()
+    a.bot_id = "10001"
+    with TestClient(a.app).websocket_connect(
+        "/qq", headers={"X-Self-ID": "10001"}
+    ) as ws:
+        ws.send_json(group_event_plain(text="别人在聊天"))
+        ws.send_json(group_event_at(text=" @我了才该回"))
+        m = _drain(a)
+    assert "别人在聊天" not in m.content
+
+
+def test_group_message_with_at_is_answered():
+    a = QQAdapter()
+    with TestClient(a.app).websocket_connect(
+        "/qq", headers={"X-Self-ID": "10001"}
+    ) as ws:
+        ws.send_json(group_event_at())
+        m = _drain(a)
+    assert m.session_id == "qq:g30003000"
+
+
+def test_at_mention_is_stripped_from_content():
+    """@ 机器人那段要从正文里去掉——模型不需要看到自己的 QQ 号被 at。"""
+    a = QQAdapter()
+    with TestClient(a.app).websocket_connect(
+        "/qq", headers={"X-Self-ID": "10001"}
+    ) as ws:
+        ws.send_json(group_event_at(text=" 塔利在吗"))
+        m = _drain(a)
+    assert m.content.strip() == "塔利在吗"
+    assert "10001" not in m.content
+
+
+def test_private_message_needs_no_at():
+    """私聊不需要 @——1:1 会话，有人在说话就是在跟我说话。"""
+    a = QQAdapter()
+    with TestClient(a.app).websocket_connect(
+        "/qq", headers={"X-Self-ID": "10001"}
+    ) as ws:
+        ws.send_json(private_event(text="私聊直接说"))
+        m = _drain(a)
+    assert m.content == "私聊直接说"
+
+
+def test_group_at_via_cq_string_also_recognized():
+    """messageFormat=string 时，@ 藏在 CQ 码里——也要认出来。"""
+    a = QQAdapter()
+    with TestClient(a.app).websocket_connect(
+        "/qq", headers={"X-Self-ID": "10001"}
+    ) as ws:
+        ev = group_event_plain(text="")
+        ev["message"] = "[CQ:at,qq=10001] 在吗"
+        ws.send_json(ev)
+        m = _drain(a)
+    assert m.session_id == "qq:g30003000"
+
+
+def test_group_at_other_person_is_ignored():
+    """@ 的是别人不是机器人 → 不响应。"""
+    a = QQAdapter()
+    with TestClient(a.app).websocket_connect(
+        "/qq", headers={"X-Self-ID": "10001"}
+    ) as ws:
+        ev = group_event_at()
+        ev["message"] = [{"type": "at", "data": {"qq": "99999"}},
+                         {"type": "text", "data": {"text": " @的是别人"}}]
+        ws.send_json(ev)
+        ws.send_json(private_event(text="我是私聊"))
+        m = _drain(a)
+    assert m.content == "我是私聊"  # 前一条被忽略，等到的是私聊那条

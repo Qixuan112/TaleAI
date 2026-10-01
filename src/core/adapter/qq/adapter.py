@@ -166,4 +166,33 @@ class QQAdapter(AdapterBase):
         if not message.content:
             return  # 纯图片/表情等无文本——M0 模型看不到，跳过
 
-        self._deliver(message)
+        # 群聊过滤：只在被 @ 时响应。
+        #
+        # 为什么必须过滤：OneBot 的反向 WS 是全局的，接上就会收到该账号能看到的
+        # **所有**群消息。在活跃群里逐条回复 = 刷屏 + 烧钱 + 被踢。私聊不需要 @
+        # （1:1 会话，有人在说话就是在跟我说话）。
+        if message.session_type == "group" and not self._mentions_bot(message):
+            logger.debug("群聊未 @ 我，忽略：session=%s", message.session_id)
+            return
+
+        self._deliver(self._strip_bot_mention(message))
+
+    def _mentions_bot(self, message: Message) -> bool:
+        """这条群消息有没有 @ 机器人。
+
+        bot_id 从握手头的 X-Self-ID 学来；还没学到就保守地不响应
+        （宁可漏回，也不要在群里乱说话）。
+        """
+        if not self.bot_id:
+            return False
+        return str(self.bot_id) in message.mentions
+
+    def _strip_bot_mention(self, message: Message) -> Message:
+        """把 @ 机器人那一段从正文里去掉。
+
+        messageFormat=array 时，正文里本来就不含 @ 段（protocol 只取 text 段），
+        这里主要是清掉残留空格；string 形态下 CQ 码已在 protocol 层剥掉。
+        模型没必要看到自己 QQ 号被 at。
+        """
+        message.content = message.content.strip()
+        return message
