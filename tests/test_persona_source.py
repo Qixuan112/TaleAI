@@ -119,15 +119,16 @@ def test_default_construction_uses_user_file_when_present(tmp_path, monkeypatch)
 def test_ensure_user_persona_seeds_blank_skeleton(tmp_path):
     """用户文件不存在 → 落一份空白骨架，用户才有得写。
 
-    落的是骨架而不是内置人设：默认不替用户把话说满（§13）。骨架判空后
-    会退回内置默认，所以用户什么都不写也能用。
+    落的是骨架而不是内置人设：默认不替用户把话说满（§13）。抬头是占位
+    「角色名」，不写死默认名——这是用户的文件。骨架判空后会退回内置默认，
+    所以用户什么都不写也能用。
     """
     target = tmp_path / "persona.md"
     created = ensure_user_persona(target)
     assert created is True
     assert target.is_file()
     text = target.read_text(encoding="utf-8")
-    assert "塔利" in text  # 标题占位
+    assert "角色名" in text  # 占位抬头，不是写死的默认名
     assert _has_real_content(text) is False  # 但没写正文
 
 
