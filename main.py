@@ -24,6 +24,7 @@ from core.adapter.registry import AdapterRegistry
 from core.adapter.router import Router, UnknownPlatformError
 from core.bus.event_bus import EventBus
 from core.llm.chat_llm import ChatLLM
+from core.llm.persona_llm.base import USER_PERSONA_PATH, ensure_user_persona
 from core.log import Logging
 from core.plugin.registry import PluginRegistry
 from core.session.store import SessionStore
@@ -347,6 +348,10 @@ def _run_cli(once: bool = False) -> None:
 
 def main() -> None:
     Logging.init()  # 启动第 2 步：日志落 data/logs/，按天轮转
+    # 第 1 步的一部分：人格文件不存在就从内置模板落一份到 data/config/，
+    # 用户第一次跑就有得改（§13：人格是用户的域）。幂等，绝不覆盖已改过的。
+    if ensure_user_persona():
+        logger.info("已从内置模板生成 %s（要改人设就改它，改完重启）", USER_PERSONA_PATH)
     argv = sys.argv[1:]
     if "--cli" in argv:
         _run_cli(once="--once" in argv)
