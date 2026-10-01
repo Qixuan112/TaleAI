@@ -90,17 +90,27 @@ _PERSONA_FIELDS = (
     FieldSpec(key="version", label="版本", type="text", default="v1"),
 )
 
-# 平台域：M0 只有 websocket 真正在用，其余是给面板预留的开关位
+# 平台域：键名必须与 loader.py 的 DEFAULT_SOURCES["platforms"] 对齐，
+# 否则面板读不到真实配置值。
 _PLATFORM_FIELDS = (
     FieldSpec(
         key="websocket.enabled", label="启用 WebUI 接入", type="bool", default=True,
     ),
     FieldSpec(
         key="websocket.port", label="WebUI 端口", type="number", default=8000,
+        help="浏览器聊天页监听的端口",
     ),
     FieldSpec(
         key="qq.enabled", label="启用 QQ 接入", type="bool", default=False,
-        help="需要先跑起 NapCatQQ 并登录；M0-14",
+        help="需要先跑起 SnowLuma 后端并登录；M0-14",
+    ),
+    FieldSpec(
+        key="qq.host", label="QQ 适配器监听地址", type="text", default="127.0.0.1",
+        help="SnowLuma 反向 WS 连过来的地址",
+    ),
+    FieldSpec(
+        key="qq.port", label="QQ 适配器端口", type="number", default=8866,
+        help="SnowLuma 的 wsClients.url 要指向这个端口",
     ),
 )
 

@@ -212,6 +212,20 @@ def _resolve_ws_port() -> int:
         return 8000
 
 
+def _qq_enabled() -> bool:
+    """QQ 是否启用：platforms.json 的 qq.enabled，默认 false。
+
+    默认关：QQ 要额外跑一个 SnowLuma 后端，没配的人不该多起一个端口、
+    更不该因为连不上而报错。要用的自己打开。
+    """
+    try:
+        from core.config.loader import Config
+
+        return bool(Config.load("platforms").get("qq", {}).get("enabled", False))
+    except Exception:
+        return False
+
+
 def _build(bus: EventBus | None = None):
     """按 §18.1 组装出 (store, router, bot, bus, adapters)。"""
     bus = bus if bus is not None else EventBus()
@@ -230,10 +244,20 @@ def _build(bus: EventBus | None = None):
         bus=bus, port=_resolve_ws_port(), history_provider=store.history
     )
     registry.register(ws_adapter)
-    # QQ 是 M0-14，不阻塞主线；接入时在这里 register 即可，Router 自动认识
+    adapters = [ws_adapter]
+
+    # 第 8 步（续）：QQ（M0-14）。默认关，配置打开才接——Router 自动认识
+    if _qq_enabled():
+        from core.adapter.qq.adapter import QQAdapter
+
+        qq_adapter = QQAdapter(bus=bus)
+        registry.register(qq_adapter)
+        adapters.append(qq_adapter)
+        logger.info("QQ 适配器已启用（反向 WS，等 SnowLuma 连入）")
+
     router = Router(registry)
 
-    return store, router, bot, bus, [ws_adapter]
+    return store, router, bot, bus, adapters
 
 
 async def _serve() -> None:
