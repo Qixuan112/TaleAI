@@ -288,13 +288,16 @@ class ChatLLM:
         )
 
     def chat(
-        self, user_question: str, history: list[dict[str, str]] | None = None,
-        session_id: str = "",
+        self, session_id: str, user_question: str,
+        history: list[dict[str, str]] | None = None,
     ) -> Reply:
         """同步入口：说一句话，拿回一次对话的完整结果（Reply，§18.3）。
 
-        参数顺序与 §22 类名表写的 chat(session_id, text) 不一致：这里保持
-        text 在第一位，因为 history 是 M0 的临时物（M0-09 的 SessionStore
-        会接手），而调换前两个参数会让现有调用静默传错。
+        签名对齐 §22 类名表：`chat(session_id, text)`。session_id 放第一位，
+        因为它是一等公民——决定回复发回哪个会话（M0-11 起有了真适配器）。
+        history 作为可选的第三参数，M1 记忆接入后由 ContextAssembler 接管。
+
+        注意：这是**同步**入口，内部 asyncio.run。前台循环（已在事件循环里）
+        必须 await `run_loop()`，不能调这个——在运行中的循环里再 run 会报错。
         """
         return asyncio.run(self.run_loop(user_question, history, session_id))
