@@ -50,12 +50,12 @@ def test_log_written_to_file(tmp_path):
 def test_chinese_not_mangled(tmp_path):
     """中文日志必须能正确读回——不显式指定 encoding 时 Windows 上按 gbk 写坏。"""
     Logging.init(log_dir=tmp_path)
-    logging.getLogger("core.test").info("初念说了：今天心情不错~")
+    logging.getLogger("core.test").info("塔利说了：今天心情不错~")
     for h in logging.getLogger().handlers:
         h.flush()
 
     text = (tmp_path / "taleai.log").read_text(encoding="utf-8")
-    assert "初念说了：今天心情不错~" in text
+    assert "塔利说了：今天心情不错~" in text
 
 
 def test_rotation_configured(tmp_path):

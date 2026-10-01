@@ -44,7 +44,7 @@ def _load_fallback_text() -> str:
         return path.read_text(encoding="utf-8").strip()
     except OSError:
         logger.warning("读不到兜底文案 %s，用内置默认", path)
-        return "……（初念好像卡了一下，你再说一遍？）"
+        return "……（塔利好像卡了一下，你再说一遍？）"
 
 
 def _parse_arguments(raw: str) -> tuple[dict, bool]:
@@ -93,7 +93,7 @@ class ChatLLM:
             )
         self.api_key: str = secrets.get("llm", {}).get("api_key", "")
 
-        # 人格（M0-03 第一半：初念）
+        # 人格（M0-03 第一半：塔利）
         self.persona = Persona()
         # 输出解析（M0-04）：把 <msg> 标签从模型输出里摘出来
         self.parser = XmlParser()

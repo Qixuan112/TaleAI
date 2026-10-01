@@ -1,4 +1,4 @@
-"""TaleAI 入口：点它就能跟初念聊上一句。"""
+"""TaleAI 入口：点它就能跟塔利聊上一句。"""
 
 import logging
 import sys
@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 SESSION_ID = "cli:local"
 
 # 本轮失败时的占位回复。落库只为保住「1 回合 = 2 行」，内容是次要的。
-_FAILED_TURN_PLACEHOLDER = "……（初念这边出了点问题，你再试一次？）"
+_FAILED_TURN_PLACEHOLDER = "……（塔利这边出了点问题，你再试一次？）"
 
 
 def _close_turn_on_error(store: SessionStore, exc: Exception) -> None:
@@ -48,9 +48,9 @@ def main() -> None:
     history: list[dict[str, str]] = store.history(SESSION_ID)
 
     if history:
-        print(f"===== 初念记得你之前来过（已恢复 {len(history)} 条历史）=====\n")
+        print(f"===== 塔利记得你之前来过（已恢复 {len(history)} 条历史）=====\n")
     else:
-        print("===== 初念在等你聊天（输入 退出/quit 结束） =====\n")
+        print("===== 塔利在等你聊天（输入 退出/quit 结束） =====\n")
 
     try:
         while True:
@@ -58,7 +58,7 @@ def main() -> None:
             if not user_input:
                 continue  # 空行（直接回车）不发请求，重新等待输入
             if user_input.lower() in {"退出", "quit", "exit", "q"}:
-                print("\n初念: 那我们就聊到这吧~ 下次见！")
+                print("\n塔利: 那我们就聊到这吧~ 下次见！")
                 break
 
             # 收即存（§18.1 第 4 步）：用户消息**先落库**，崩溃不丢。
@@ -70,7 +70,7 @@ def main() -> None:
                 print(f"\n  〔这条消息没存下来，这轮跳过：{exc}〕")
                 continue
 
-            # 带上**落库前**的 history 去问初念（history 是上一轮末尾刷新的）。
+            # 带上**落库前**的 history 去问塔利（history 是上一轮末尾刷新的）。
             # 用户消息已进库，若在这里再取一次会把它读回来，装配时就重复发一遍
             # （装配 = history + 最新提问）。所以传旧的 history。
             try:
@@ -86,7 +86,7 @@ def main() -> None:
             except Exception as exc:
                 # 对话或落库失败：补平这一回合，别让 user 行单挂，然后继续下一轮
                 _close_turn_on_error(store, exc)
-                print(f"\n  〔初念这次没答上来：{exc}〕")
+                print(f"\n  〔塔利这次没答上来：{exc}〕")
                 history = store.history(SESSION_ID)
                 continue
 
@@ -94,7 +94,7 @@ def main() -> None:
             history = store.history(SESSION_ID)
 
             for message in reply.messages:
-                print(f"\n初念: {message}")
+                print(f"\n塔利: {message}")
 
             # 工具调用是内部动作，但 M0 的验收要求它"可观测"，所以显式打出来
             if reply.tool_calls_made:
