@@ -44,7 +44,7 @@ def _load_fallback_text() -> str:
         return path.read_text(encoding="utf-8").strip()
     except OSError:
         logger.warning("读不到兜底文案 %s，用内置默认", path)
-        return "……（塔利好像卡了一下，你再说一遍？）"
+        return "……嗯？我刚走神了，你再说一遍？"
 
 
 def _parse_arguments(raw: str) -> tuple[dict, bool]:

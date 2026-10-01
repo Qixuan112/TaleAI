@@ -118,7 +118,13 @@ def test_system_message_stays_byte_stable():
     msgs = bot.assemble_messages("你好")
     assert msgs[0]["role"] == "system"
     assert msgs[0]["content"] == bot.persona.build_system_prompt()
-    assert "system_reminder" not in msgs[0]["content"]
+    # 精确锚「动态块的实际渲染产物」（含注入的固定时间），而不是裸词
+    # 「system_reminder」——静态提示词里本就该出现该标签（base.md 要教模型
+    # 怎么对待它），那是指令，不是泄漏。真正要防的是渲染出来的 reminder
+    # 整块进 system。
+    reminder = bot.context.render_reminder(bot.context.assemble("chat"))
+    assert reminder  # 前提：确实渲染出了东西，否则下面断言是空谈
+    assert reminder not in msgs[0]["content"]
 
 
 def test_reminder_goes_to_latest_user_message_head():
