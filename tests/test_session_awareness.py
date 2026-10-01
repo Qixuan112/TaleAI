@@ -89,7 +89,10 @@ def test_session_info_goes_to_dynamic_block_not_system():
     session = SessionContext(session_id="qq:g1", session_type="group", owner="u1")
     msgs = bot.assemble_messages("你好", None, session=session)
     assert msgs[0]["role"] == "system"
-    assert "群聊" not in msgs[0]["content"]
+    # 用「会话类型：群聊」这个动态块**精确产物**做锚，而不是裸词「群聊」：
+    # 静态提示词里本就该出现「群聊」（base.md 有群聊场景的行为指引），那是
+    # 行为描述，不是会话类型泄漏。真正要防的是这行按会话生成的信息进 system。
+    assert "会话类型：群聊" not in msgs[0]["content"]
     assert msgs[0]["content"] == bot.persona.build_system_prompt()
 
 
