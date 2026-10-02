@@ -26,6 +26,7 @@ from collections import OrderedDict
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 from core.adapter.base import AdapterBase, Message, Reply
+from core.adapter.pacing import typing_delay
 from core.adapter.qq.protocol import build_send_action, parse_event
 from core.bus.event_bus import EventBus
 
@@ -34,9 +35,6 @@ logger.addHandler(logging.NullHandler())
 
 #: 去重窗口：平台重发（断线重连）会带同一个 message_id
 _DEDUP_MAX = 1000
-
-#: 分条发送之间的停顿（秒）。太短客户端会合并/乱序，太长显得卡。
-_SPLIT_DELAY_SEC = 0.6
 
 
 class QQAdapter(AdapterBase):
@@ -77,8 +75,10 @@ class QQAdapter(AdapterBase):
         是分开的气泡。QQ 虽然没有"气泡"概念，但能连发多条消息——拼成一段会
         把这个节奏压没，两边体验不一致。
 
-        条与条之间隔一小会儿：不隔的话多条消息几乎同时到达，客户端可能合并、
-        顺序也可能乱。人说话本来就有停顿，这个延迟也更自然。
+        条与条之间按"真人打字"的节奏停一下（见 `core.adapter.pacing`）：停多久
+        取决于**下一条有多长**——刚才那句短、下一句长，就多等一会儿；再叠
+        一点随机抖动，不匀速。不隔的话多条消息几乎同时到达，客户端可能合并、
+        顺序也可能乱。人说话本来就有停顿，这个节奏也更自然。
         """
         if self._link is None:
             logger.warning("QQ 未连接，丢弃这条回复：session=%s", reply.session_id)
@@ -91,7 +91,7 @@ class QQAdapter(AdapterBase):
 
         for i, text in enumerate(parts):
             if i:
-                await asyncio.sleep(_SPLIT_DELAY_SEC)
+                await asyncio.sleep(typing_delay(text))
             await self._send_one(reply.session_id, text)
 
     async def _send_one(self, session_id: str, text: str) -> None:

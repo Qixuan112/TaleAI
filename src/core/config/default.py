@@ -15,8 +15,11 @@ DEFAULT_CONFIG = {
         "base_url": "",  # 服务商网关（必须是 /v1 结尾的 API 地址）
         "model": "",  # 模型名
         "api_keys": [],  # 真正的 key 放 secrets.json
-        "history_max_turns": 40,  # 弹簧窗口：超过这个回合数才裁剪
-        "history_trim_to": 10,  # 裁剪后保留的回合数
+        # 模型上下文窗口：每次请求往回带的历史。
+        # 保留最新 history_keep_messages 条，再往前多带 history_lookback_extra
+        # 条旧消息（边界不硬切，上下文更连贯）。两个都按「条」算（每条消息=1）。
+        "history_keep_messages": 10,
+        "history_lookback_extra": 5,
         "max_agent_steps": 3,  # FC 循环上限（§19-2：全局 3 轮不变）
     },
     # 角色配置

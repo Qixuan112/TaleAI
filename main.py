@@ -26,6 +26,7 @@ from core.bus.event_bus import EventBus
 from core.llm.chat_llm import ChatLLM
 from core.llm.persona_llm.base import USER_PERSONA_PATH, ensure_user_persona
 from core.log import Logging
+from core.log_stream import LogStream, StreamLogHandler
 from core.plugin.registry import PluginRegistry
 from core.session.store import SessionStore
 
@@ -235,21 +236,28 @@ def _qq_enabled() -> bool:
 
 
 def _build(bus: EventBus | None = None):
-    """按 §18.1 组装出 (store, router, bot, bus, adapters)。"""
+    """按 §18.1 组装出 (store, router, bot, bus, adapters, stream)。"""
     bus = bus if bus is not None else EventBus()
     store = SessionStore().open()  # 第 3 步：SQLite + WAL + 建表
     PluginRegistry().scan()  # 第 4 步：扫内置 + data/plugin 注册工具
 
     from core.adapter.websocket.adapter import WebSocketAdapter
 
-    bot = ChatLLM()
+    # 实时日志流（§18.2 目录里订阅者为「日志」的那几条）：订阅总线，
+    # 供 WebUI 的 /logs 页看「塔利在干什么」。日志镜像 handler 在 _serve 里挂。
+    stream = LogStream()
+    stream.subscribe_bus(bus)
+
+    bot = ChatLLM(bus=bus)
 
     # 第 8 步：适配器名册 + Router
     registry = AdapterRegistry()
     # 注入读历史的回调：连上时补发历史，否则刷新页面后是空的（M0 验收⑤）。
-    # 用回调而不是把 store 塞给适配器——适配器不该认识 SessionStore（§22 import 单向）
+    # 用回调而不是把 store 塞给适配器——适配器不该认识 SessionStore（§22 import 单向）。
+    # clearer 同理：网页上「清空本次历史」要能删库，但适配器只认「(session_id)->删了几条」。
     ws_adapter = WebSocketAdapter(
-        bus=bus, port=_resolve_ws_port(), history_provider=store.history
+        bus=bus, port=_resolve_ws_port(), history_provider=store.history,
+        clearer=store.clear, stream=stream,
     )
     registry.register(ws_adapter)
     adapters = [ws_adapter]
@@ -265,12 +273,23 @@ def _build(bus: EventBus | None = None):
 
     router = Router(registry)
 
-    return store, router, bot, bus, adapters
+    return store, router, bot, bus, adapters, stream
 
 
 async def _serve() -> None:
-    """默认跑法：起 WebSocket 服务（WebUI 聊天）。"""
-    store, router, bot, bus, adapters = _build()
+    """默认跑法：起 WebSocket 服务（WebUI 聊天 + /logs 日志页）。"""
+    store, router, bot, bus, adapters, stream = _build()
+    # 日志镜像：把 root 的每条日志也推到 /logs 页。**单独挂**而不是塞进
+    # Logging.init()——init 的契约是「只加一个文件 handler」（test_log.py 钉着），
+    # 破了它日志会重复落盘。服务退出时摘掉，保持干净。
+    root = logging.getLogger()
+    mirror = StreamLogHandler(stream)
+    root.addHandler(mirror)
+    # 起服务前先喊一嗓子：终端沉默是老毛病（服务模式本就不打印），
+    # 这行 + /logs 页让"它到底起来没"一目了然。
+    port = _resolve_ws_port()
+    logger.info("塔利已就绪 → 聊天 http://127.0.0.1:%d/ · 日志 http://127.0.0.1:%d/logs",
+                port, port)
     try:
         # 第 9 步：把适配器挂成常驻任务，然后前台循环等消息
         await asyncio.gather(
@@ -278,6 +297,7 @@ async def _serve() -> None:
             serve_forever(adapters, router=router, store=store, bot=bot, bus=bus),
         )
     finally:
+        root.removeHandler(mirror)
         store.close()
 
 

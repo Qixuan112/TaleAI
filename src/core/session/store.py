@@ -249,3 +249,19 @@ class SessionStore:
             "SELECT COUNT(*) AS n FROM messages WHERE session_id = ?", (session_id,)
         ).fetchone()
         return int(row["n"])
+
+    def clear(self, session_id: str) -> int:
+        """清空某个会话的全部消息（不删会话行本身）。返回删掉的行数。
+
+        为什么留着 sessions 行：会话的身份（platform / kind / owner）不该因为
+        "清空聊天记录"就没了——清了历史它还是同一个会话，下次来消息时
+        ensure_session 也就不用重建。这跟聊天软件里"清空聊天记录"是一致的。
+
+        用 rowcount 返回条数，调用方能据此给用户一个交代（"清了 N 条"）。
+        """
+        with self._lock:
+            cur = self._db.execute(
+                "DELETE FROM messages WHERE session_id = ?", (session_id,)
+            )
+            self._db.commit()
+            return int(cur.rowcount)

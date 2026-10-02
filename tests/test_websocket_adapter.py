@@ -225,6 +225,60 @@ def test_history_frame_is_not_a_chat_message():
     assert "tool_calls_made" not in frame
 
 
+# ---------- 清空历史（网页上的「清空历史」按钮） ----------
+
+
+def test_clear_frame_calls_clearer_and_replies():
+    """收到 {action: clear} → 调 clearer(session) → 回 {type: cleared, deleted}。"""
+    cleared = []
+
+    def clearer(sid):
+        cleared.append(sid)
+        return 3
+
+    a = WebSocketAdapter(clearer=clearer)
+    with TestClient(a.app).websocket_connect("/ws?session_id=web:me") as ws:
+        ws.send_json({"action": "clear", "session_id": "web:me"})
+        frame = ws.receive_json()
+    assert cleared == ["web:me"]
+    assert frame["type"] == "cleared"
+    assert frame["deleted"] == 3
+    assert frame["ok"] is True
+
+
+def test_clear_frame_is_not_a_chat_message():
+    """清空帧不能被当成聊天消息投进收件箱（它没有 content）。"""
+    a = WebSocketAdapter(clearer=lambda sid: 0)
+    with TestClient(a.app).websocket_connect("/ws?session_id=s") as ws:
+        ws.send_json({"action": "clear", "session_id": "s"})
+        ws.receive_json()  # cleared 回执
+    # 收件箱里不该有东西（若被误当消息，这里会取到一条）
+    with pytest.raises(asyncio.TimeoutError):
+        asyncio.run(asyncio.wait_for(a.recv(), timeout=0.3))
+
+
+def test_clear_without_clearer_replies_ok_but_zero():
+    """没注入 clearer 时不报错——回 ok 且 deleted=0（清空不在核心链路上）。"""
+    a = WebSocketAdapter()
+    with TestClient(a.app).websocket_connect("/ws?session_id=s") as ws:
+        ws.send_json({"action": "clear", "session_id": "s"})
+        frame = ws.receive_json()
+    assert frame["type"] == "cleared"
+    assert frame["deleted"] == 0
+
+
+def test_clear_failure_reports_not_ok():
+    """clearer 抛异常 → 回 ok=False，不把异常炸回 WS 循环。"""
+    def boom(sid):
+        raise RuntimeError("库坏了")
+
+    a = WebSocketAdapter(clearer=boom)
+    with TestClient(a.app).websocket_connect("/ws?session_id=s") as ws:
+        ws.send_json({"action": "clear", "session_id": "s"})
+        frame = ws.receive_json()
+    assert frame["ok"] is False
+
+
 # ---------- 静态页（M0-12 的挂钩，这里确认路由不挡 WS） ----------
 
 

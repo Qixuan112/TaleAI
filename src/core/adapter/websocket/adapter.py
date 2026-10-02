@@ -24,11 +24,12 @@ from pathlib import Path
 from typing import Callable
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from core.adapter.base import AdapterBase, Message, Reply
 from core.bus.event_bus import EventBus
+from core.log_stream import LogStream
 
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
@@ -52,6 +53,8 @@ class WebSocketAdapter(AdapterBase):
         host: str = "127.0.0.1",
         port: int = 8000,
         history_provider: Callable[[str], list[dict]] | None = None,
+        clearer: Callable[[str], int] | None = None,
+        stream: LogStream | None = None,
     ) -> None:
         super().__init__(bus=bus)
         self.host = host
@@ -60,6 +63,12 @@ class WebSocketAdapter(AdapterBase):
         # 为什么用回调而不是直接传 store：适配器不该认识 SessionStore（§22 import 单向）。
         # 不注入就退化成"连上不补历史"——测试/裸连能用。
         self._history_provider = history_provider
+        # 清空历史的回调（session_id → 删掉的条数）。由 main 注入 store.clear。
+        # 同样不直接传 store，理由同上；不注入就忽略清空请求。
+        self._clearer = clearer
+        # 实时日志流（可选）。注入才挂 /events（SSE）与 /logs（调试页）——
+        # 不注入时行为跟以前完全一样（大量测试构造裸适配器，不能被波及）。
+        self._stream = stream
         # session_id → 连接。同会话重连覆盖旧连接（后连的说了算）
         self._connections: dict[str, WebSocket] = {}
         self.app = self._build_app()
@@ -135,6 +144,29 @@ class WebSocketAdapter(AdapterBase):
         except Exception:
             logger.warning("补发历史失败：session=%s", session_id, exc_info=True)
 
+    async def _clear_and_reply(self, websocket: WebSocket, session_id: str) -> None:
+        """清空该会话历史，并回一帧告诉前端清了几条。
+
+        前端据此把页面气泡也抹掉。没注入 clearer 就只回 ok=0——
+        不报错（清空不是核心链路），也别让前端一直等回执。
+        """
+        deleted = 0
+        ok = True
+        if self._clearer is not None:
+            try:
+                deleted = self._clearer(session_id)
+            except Exception:
+                ok = False
+                logger.exception("清空历史失败：session=%s", session_id)
+        else:
+            logger.warning("收到清空请求但未注入 clearer：session=%s", session_id)
+        try:
+            await websocket.send_json(
+                {"type": "cleared", "session_id": session_id, "deleted": deleted, "ok": ok}
+            )
+        except Exception:
+            logger.warning("回清空结果失败：session=%s", session_id, exc_info=True)
+
     def _build_app(self) -> FastAPI:
         app = FastAPI(title="TaleAI WebUI")
 
@@ -150,6 +182,11 @@ class WebSocketAdapter(AdapterBase):
             try:
                 while True:
                     raw = await websocket.receive_json()
+                    # 控制帧（清空历史）不是聊天消息，先分流——
+                    # 它带 action 字段，normalize 会把它当空内容丢掉。
+                    if isinstance(raw, dict) and raw.get("action") == "clear":
+                        await self._clear_and_reply(websocket, session_id)
+                        continue
                     message = self.normalize({**raw, "session_id": session_id})
                     if not message.content:
                         continue  # 空消息不发请求（跟 CLI 的空行一致）
@@ -164,6 +201,29 @@ class WebSocketAdapter(AdapterBase):
                 if self._connections.get(session_id) is websocket:
                     self._connections.pop(session_id, None)
                 logger.info("WebUI 已断开：session=%s", session_id)
+
+        # 实时日志（可选）：SSE 流 + 调试页。没注入 stream 就不挂这两条路由——
+        # 大量测试构造裸适配器，行为必须跟以前一样。
+        if self._stream is not None:
+            stream = self._stream
+
+            @app.get("/events")
+            async def events() -> StreamingResponse:
+                """SSE：把日志与关键事件实时推给页面。
+
+                X-Accel-Buffering: no —— 万一前面挂了 nginx，别让它把流缓冲起来，
+                否则「实时」就变成「攒一堆一次性吐」。没有反代时这个头无害。
+                """
+                return StreamingResponse(
+                    stream.stream(),
+                    media_type="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+                )
+
+            @app.get("/logs")
+            async def logs() -> RedirectResponse:
+                """日志调试页入口，跟 / → index.html 同构。"""
+                return RedirectResponse("/static/logs.html")
 
         # 静态聊天页。挂到 / 下；webui/index.html 就是入口（M0-12）。
         if WEBUI_DIR.is_dir():

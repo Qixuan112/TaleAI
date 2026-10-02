@@ -20,6 +20,7 @@ from pathlib import Path
 from openai import AsyncOpenAI
 
 from core.adapter.base import Reply
+from core.bus.event_bus import EventBus
 from core.config.loader import Config
 from core.executor import ToolCall, ToolExecutor
 from core.llm.context import ContextAssembler, SessionContext
@@ -74,10 +75,35 @@ def _canonical_signature(raw: str) -> str:
     return json.dumps(args, sort_keys=True, ensure_ascii=False)
 
 
+def _history_turn_for_model(entry: dict) -> dict:
+    """把一条历史 entry 转成**喂给模型**的形状（补回 <msg> 标签）。
+
+    为什么需要这一步：历史正文在库里/界面里是**纯文本**——存储按原文存
+    （记忆、检索都用它），WebUI 用 textContent 渲染（不能塞标签）。但
+    模型学格式是"看前文怎么写"，历史里的 assistant 若是裸文本，它会跟着
+    裸文本走——不再输出 <msg>，分条立刻失效（实测：裸文本历史 11/15 轮
+    丢契约，补回标签后 0/15）。所以「存储形态」与「模型形态」必须分开：
+    进模型上下文时把 assistant 的正文按空行还原成一条条 <msg>，正是
+    QQ 适配器当初分条发送的那个边界。
+
+    user 消息原样返回——那是用户的话，本就不该有 <msg>（契约里 <msg>
+    只包"你说给用户听的话"）。已带 <msg> 的也不重复包（幂等）。
+    """
+    if entry.get("role") != "assistant":
+        return entry
+    content = entry.get("content", "")
+    if not content or "<msg>" in content:
+        return entry
+    parts = [p.strip() for p in content.split("\n\n") if p.strip()]
+    if not parts:
+        return entry
+    return {**entry, "content": "\n\n".join(f"<msg>{p}</msg>" for p in parts)}
+
+
 class ChatLLM:
     """对话机器人：组装上下文并调用真实 LLM。"""
 
-    def __init__(self) -> None:
+    def __init__(self, bus: EventBus | None = None) -> None:
         # 读配置（服务商 / 模型 / key）
         cfg = Config.load("config")
         secrets = Config.load("secrets")
@@ -97,20 +123,26 @@ class ChatLLM:
         self.persona = Persona()
         # 输出解析（M0-04）：把 <msg> 标签从模型输出里摘出来
         self.parser = XmlParser()
-        # 历史裁剪策略：弹簧窗口（默认以回合为单位）
+        # 模型上下文窗口：每次请求往回带多少历史。
+        # 保留最新 history_keep_messages 条，再往前多带 history_lookback_extra
+        # 条旧消息（边界不硬切，上下文更连贯）。两个都按「条」算。
         # 可通过 data/config/config.json 的 llm 字段配置：
-        #   "history_max_turns": 40, "history_trim_to": 10
-        self.history_max_turns: int = int(llm.get("history_max_turns", 40))
-        self.history_trim_to: int = int(llm.get("history_trim_to", 10))
+        #   "history_keep_messages": 10, "history_lookback_extra": 5
+        self.history_keep_messages: int = int(llm.get("history_keep_messages", 10))
+        self.history_lookback_extra: int = int(llm.get("history_lookback_extra", 5))
         # FC 循环上限（§19-2：全局 3 轮不变；配置只是让它可调，不是让它可变大）
         self.max_agent_steps: int = int(llm.get("max_agent_steps", 3))
         # 异步客户端（openai 3.x 是异步优先）
         self.client = AsyncOpenAI(base_url=self.base_url, api_key=self.api_key)
         # 上下文装配（M0-03 欠的那半）：动态块由它准备，本类不自己拼（§18.5 硬规则 6）
         self.context = ContextAssembler()
-        # 工具链（M0-05/06/07）：注册表提供工具表，执行器负责跑
+        # 工具链（M0-05/06/07）：注册表提供工具表，执行器负责跑。
+        # bus 透传给执行器——它执行完发 tool.called（§18.2），供日志页订阅。
         self.registry = PluginRegistry()
-        self.executor = ToolExecutor(self.registry)
+        self.executor = ToolExecutor(self.registry, bus=bus)
+        # 当前处理的会话 ID：_tool_message 发 tool.called 时带上，标注谁触发的。
+        # run_loop 每轮进来时刷新（单实例串行处理，不担心并发）。
+        self._current_session_id: str = ""
         # 兜底文案（§19-2：模型什么都没说时发它；写在 prompts 里可改）
         self.fallback_text = _load_fallback_text()
 
@@ -134,10 +166,12 @@ class ChatLLM:
             {"role": "system", "content": self.persona.build_system_prompt()},  # 稳定 → 前缀
         ]
 
-        # 如果提供了历史，先按弹簧窗口策略裁剪（只有超限才裁）
+        # 如果提供了历史，先按窗口裁到最近若干条（再多带几条旧的）
         if history:
-            trimmed = self._trim_history_if_needed(history)
-            messages.extend(trimmed)
+            trimmed = self._recent_history(history)
+            # 补回 <msg> 标签再喂模型——历史正文在库里是纯文本，直接喂会让
+            # 模型跟着裸文本走、丢掉输出契约（分条失效）。详见该函数 docstring。
+            messages.extend(_history_turn_for_model(m) for m in trimmed)
 
         # 动态块包在 <system_reminder> 里，贴在最新提问前面
         reminder = self.context.render_reminder(self.context.assemble("chat", session))
@@ -147,33 +181,26 @@ class ChatLLM:
         messages.append({"role": "user", "content": content})
         return messages
 
-    def _trim_history_if_needed(self, history: list[dict[str, str]]) -> list[dict[str, str]]:
-        """弹簧窗口策略：以回合（user+assistant）为单位计数。
+    def _recent_history(self, history: list[dict[str, str]]) -> list[dict[str, str]]:
+        """滑动窗口：保留最新 N 条，再往前多带 M 条旧消息。
 
-        - history 是消息列表（交替的 user/assistant）。
-        - 计算回合数 = ceil(len(history) / 2).
-        - 若回合数 <= history_max_turns: 不裁剪，返回原样。
-        - 若回合数 > history_max_turns: 裁剪到最后 `history_trim_to` 回合并返回。
+        「时刻保持最新」由它保证：无论会话多长，喂给模型的永远是"最近这一截"，
+        窗口随新消息向前滑。多带那 M 条是为了让**窗口边界不硬切**——只留最新
+        N 条时，模型会看不到紧邻窗口外那几句，衔接处容易断；往前多带一截，
+        上一句在聊什么就接得上了（相当于给窗口一个缓冲带）。
 
-        备注：裁剪会改动前缀，但只在超限时发生——符合弹簧窗口策略。
+        两个值都按「条」算（每条消息 = 1）。M=0 就是纯滑动窗口。
+        条数基于 history 的实际行——不假设"1 轮 = 2 行"，末尾有单挂的
+        收尾行也不影响：切出来的永远是"最新的那截"，且不会切出半条。
+
+        history 是调用方的 list，这里绝不改它——只读、返回一个新切片。
         """
         if not history:
             return history
-
-        # 以回合为单位计算（每回合约两条消息 user+assistant）
-        total_msgs = len(history)
-        total_turns = (total_msgs + 1) // 2
-
-        if total_turns <= self.history_max_turns:
-            return history
-
-        # 需要裁剪：保留最后 N 回合
-        keep_turns = max(1, min(self.history_trim_to, total_turns))
-        # 每回合近似 2 条消息；保留消息数 = keep_turns * 2
-        keep_msgs = keep_turns * 2
-
-        # 从尾部切割，确保以完整消息为单位
-        return history[-keep_msgs:]
+        total = self.history_keep_messages + self.history_lookback_extra
+        if total <= 0:
+            return history  # 0/负 = 不限窗口（调试用）
+        return history[-total:]
 
     async def _request(self, messages: list, tools: list[dict] | None = None):
         """发一次请求，返回 assistant message（可能带 tool_calls）。
@@ -213,7 +240,8 @@ class ChatLLM:
             payload = {"error": f"参数不是合法 JSON：{raw_args}"}
         else:
             result = self.executor.execute(
-                ToolCall(call_id=sdk_call.id, name=sdk_call.function.name, arguments=args)
+                ToolCall(call_id=sdk_call.id, name=sdk_call.function.name, arguments=args),
+                session_id=self._current_session_id,
             )
             # 成功回结果，失败回原因——模型得知道为什么失败才能纠正
             payload = (
@@ -252,6 +280,8 @@ class ChatLLM:
         )
         messages = self.assemble_messages(user_question, history, session=session)
         tools = self.registry.tool_schemas()
+        # 记下本次会话 ID，_tool_message 发 tool.called 时用（旁路事件标注来源）
+        self._current_session_id = session_id
 
         collected: list[str] = []
         tool_calls_made = 0

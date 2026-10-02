@@ -14,6 +14,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
+from core.bus.event_bus import EventBus
 from core.plugin.guard import PermissionGuard
 from core.plugin.registry import PluginRegistry
 
@@ -52,17 +53,44 @@ class ToolExecutor:
         self,
         registry: PluginRegistry | None = None,
         guard: PermissionGuard | None = None,
+        *,
+        bus: EventBus | None = None,
     ) -> None:
         self._registry = registry if registry is not None else PluginRegistry()
         self._guard = guard if guard is not None else PermissionGuard(self._registry)
+        # 事件总线（可选）：每次执行完发一条 tool.called（§18.2 目录，生产者=
+        # ToolExecutor，订阅者=日志）。不注入就不发——单测/CLI 不需要。
+        self._bus = bus
 
-    def execute(self, call: ToolCall) -> ToolResult:
+    def execute(self, call: ToolCall, *, session_id: str = "") -> ToolResult:
         """执行一次工具调用。任何失败都变成 ToolResult，不向上抛。
 
         为什么不抛异常：模型可能调一个不存在的工具、或给出参数不匹配的
         参数——这是**正常情况**而不是程序错误，得把"为什么失败"回喂给模型
         让它自己纠正，而不是让整条链路崩掉。
+
+        session_id 只用于旁路事件（tool.called 想记是谁触发的）；ToolCall
+        本身不含它（形状 §18.3 固定），所以由调用方顺手带进来。
         """
+        result = self._execute(call)
+        self._publish_called(call, result, session_id)
+        return result
+
+    def _publish_called(
+        self, call: ToolCall, result: ToolResult, session_id: str
+    ) -> None:
+        """旁路喊一声"调了工具"（失败也算——失败更值得看）。"""
+        if self._bus is None:
+            return
+        self._bus.publish(
+            "tool.called",
+            session_id=session_id,
+            tool=call.name,
+            ok=result.ok,
+            error=result.error,
+        )
+
+    def _execute(self, call: ToolCall) -> ToolResult:
         tool = self._registry.tools().get(call.name)
 
         if tool is None:
@@ -97,13 +125,13 @@ class ToolExecutor:
 
         return ToolResult(call=call, ok=True, data=_normalize(raw))
 
-    def execute_all(self, calls: list[ToolCall]) -> list[ToolResult]:
+    def execute_all(self, calls: list[ToolCall], *, session_id: str = "") -> list[ToolResult]:
         """按顺序执行一批调用。
 
         串行而非并行：M0 的工具都是零权限、瞬时的，并行带来的复杂度
         （竞态、结果顺序）换不来收益。等真有慢工具（网络类）再说。
         """
-        return [self.execute(call) for call in calls]
+        return [self.execute(call, session_id=session_id) for call in calls]
 
 
 def _normalize(raw: Any) -> dict:

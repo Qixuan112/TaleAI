@@ -175,6 +175,32 @@ async def test_single_message_still_one_action():
     assert len(link.sent) == 1
 
 
+async def test_split_waits_between_messages_but_not_before_first(monkeypatch):
+    """分条之间要停一下（第一条不等待），停顿节奏交给 pacing.typing_delay。
+
+    这里只验证"调用时机与参数"：停在第 2、3 条**之前**，且问的是**下一条**的
+    长度（真人打多久取决于接下来要敲多少）。真正的时长公式由 test_pacing 覆盖。
+    """
+    import core.adapter.qq.adapter as qq_mod
+
+    asked: list[str] = []
+    monkeypatch.setattr(qq_mod, "typing_delay", lambda text: asked.append(text) or 0.0)
+
+    slept: list[float] = []
+
+    async def fake_sleep(sec):
+        slept.append(sec)
+
+    monkeypatch.setattr(qq_mod.asyncio, "sleep", fake_sleep)
+
+    a = QQAdapter()
+    a._link = FakeLink()
+    await a.send(Reply(session_id="qq:p1", messages=["一", "二", "三"]))
+
+    assert asked == ["二", "三"]      # 问的是下一条，且第一条不问
+    assert len(slept) == 2            # 三条之间停两次
+
+
 async def test_send_without_connection_is_skipped_not_raised():
     """没连上就发 → 记日志跳过，不抛（跟 WebSocketAdapter 一致）。"""
     a = QQAdapter()
