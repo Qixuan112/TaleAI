@@ -266,7 +266,12 @@ async def test_unknown_platform_does_not_crash_the_loop(store, clean_bus):
 
 
 async def test_user_write_failure_skips_the_model_call(store, clean_bus, monkeypatch):
-    """user 落库失败：这轮干脆不调模型（免得用户以为发出去了）。"""
+    """user 落库失败：这轮不调模型（免得用户以为发出去了），但**要回一帧**。
+
+    契约修正（PR #10）：旧实现直接 return None，适配器收不到任何帧，WebUI
+    永远停在「塔利在想…」。现在补发一条 error 回复让界面解开；仍返回 None
+    （user 行没落库，不能补写 assistant 行，保住「1 回合 = 2 行」）。
+    """
     import main
 
     adapter = FakeAdapter(bus=clean_bus)
@@ -281,8 +286,10 @@ async def test_user_write_failure_skips_the_model_call(store, clean_bus, monkeyp
     reply = await main.handle_message(
         make_message("你好"), router=Router(reg), store=store, bot=bot, bus=clean_bus,
     )
-    assert reply is None
-    assert bot.calls == []
+    assert reply is None          # 不补 assistant 行，回合不成立
+    assert bot.calls == []        # 没调模型
+    assert len(adapter.sent) == 1  # 但回了一帧，界面不会卡住
+    assert adapter.sent[0].stop_reason == "error"
 
 
 # ---------- serve_forever：把适配器挂起来 ----------
