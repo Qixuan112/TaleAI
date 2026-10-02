@@ -46,6 +46,25 @@
   header .status.off::before { content: "● "; color: #d98b8b; }
   header .spacer { flex: 1; }
 
+  /* ---- 顶部导航：聊天 / 设置 / 日志（当前页高亮）---- */
+  .nav {
+    display: flex;
+    gap: 2px;
+    padding: 0 14px;
+    border-bottom: 1px solid var(--line);
+    background: var(--panel);
+  }
+  .nav a {
+    padding: 8px 12px;
+    font-size: 13px;
+    color: var(--muted);
+    text-decoration: none;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+  }
+  .nav a:hover { color: var(--ink); }
+  .nav a.active { color: var(--tale); border-bottom-color: var(--tale); font-weight: 600; }
+
   /* ---- 核弹发射钮：3D 红钮嵌在金属底座里，外裹黄黑警示带 ---- */
   .nuke {
     --nuke: #d21f1f;            /* 钮面主红 */
@@ -239,6 +258,12 @@
       <span class="cap"></span>
     </button>
   </header>
+
+  <nav class="nav">
+    <a class="active" href="/">聊天</a>
+    <a href="/settings">设置</a>
+    <a href="/logs">日志</a>
+  </nav>
 
   <div id="messages"></div>
 

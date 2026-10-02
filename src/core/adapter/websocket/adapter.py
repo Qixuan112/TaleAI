@@ -55,6 +55,7 @@ class WebSocketAdapter(AdapterBase):
         history_provider: Callable[[str], list[dict]] | None = None,
         clearer: Callable[[str], int] | None = None,
         stream: LogStream | None = None,
+        extra_routes: Callable[[FastAPI], None] | None = None,
     ) -> None:
         super().__init__(bus=bus)
         self.host = host
@@ -69,6 +70,10 @@ class WebSocketAdapter(AdapterBase):
         # 实时日志流（可选）。注入才挂 /events（SSE）与 /logs（调试页）——
         # 不注入时行为跟以前完全一样（大量测试构造裸适配器，不能被波及）。
         self._stream = stream
+        # 控制面路由注册器（可选）。由 main 注入一个 `(app) -> None`，在里面挂
+        # 设置读写的 /api/* 等业务路由。用回调而不是把 Config 塞进来——同样是
+        # §22 import 单向：适配器只管"接",不认识配置/存储。不注入＝不多挂任何路由。
+        self._extra_routes = extra_routes
         # session_id → 连接。同会话重连覆盖旧连接（后连的说了算）
         self._connections: dict[str, WebSocket] = {}
         self.app = self._build_app()
@@ -231,7 +236,17 @@ class WebSocketAdapter(AdapterBase):
             async def index() -> RedirectResponse:
                 return RedirectResponse("/static/index.html")
 
+            @app.get("/settings")
+            async def settings() -> RedirectResponse:
+                """设置页入口，跟 / → index.html、/logs → logs.html 同构。"""
+                return RedirectResponse("/static/settings.html")
+
             app.mount("/static", StaticFiles(directory=str(WEBUI_DIR)), name="static")
+
+        # 控制面路由（设置读写等）由 main 用回调注入——适配器不认识 Config（§22）。
+        # 放在最后：/api/* 与 /ws、/static 等不重叠，顺序无碍。
+        if self._extra_routes is not None:
+            self._extra_routes(app)
 
         return app
 
