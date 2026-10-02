@@ -15,6 +15,7 @@
 import asyncio
 import json
 import logging
+import re
 from pathlib import Path
 
 from openai import AsyncOpenAI
@@ -23,7 +24,7 @@ from core.adapter.base import Reply
 from core.bus.event_bus import EventBus
 from core.config.loader import Config
 from core.executor import ToolCall, ToolExecutor
-from core.llm.context import ContextAssembler, SessionContext
+from core.llm.context import ContextAssembler, SessionContext, escape_tag_markers
 from core.llm.persona_llm.base import Persona
 from core.plugin.registry import PluginRegistry
 from core.xml_parser import ParsedOutput, XmlParser
@@ -36,6 +37,22 @@ logger.addHandler(logging.NullHandler())
 
 # 本模块在 src/core/llm/ 下，prompts/ 是它的同级目录
 _PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
+
+#: 包裹正文用的标签本身（小写契约，见 xml_parser）。正文里若原样出现它们，
+#: 补标签喂模型时会被提前闭合/嵌套——所以包裹前先转义。
+_MSG_TAG = re.compile(r"</?msg>", re.IGNORECASE)
+
+
+def _escape_msg_tags(text: str) -> str:
+    """把正文里可能被误当标签的 `<msg>` / `</msg>` 转义掉，再包进 <msg>。
+
+    为什么需要：非兜底的 part 由解析器保证不含标签（它在第一个 </msg> 处收尾，
+    且拒绝嵌套），所以正常回复转义是空操作。只有**兜底** part（模型已破坏
+    契约、整段原文当一条）可能含裸标签——不转义的话，"用 </msg> 结束" 这类
+    正文补上外层 <msg> 后会提前闭合，下一轮模型读到的是残缺的标签结构，
+    正是 PR #10 复现的格式漂移。转义保证补回的始终是**无歧义**的标签结构。
+    """
+    return _MSG_TAG.sub(lambda m: "&lt;" + m.group(0)[1:], text)
 
 
 def _load_fallback_text() -> str:
@@ -86,18 +103,42 @@ def _history_turn_for_model(entry: dict) -> dict:
     进模型上下文时把 assistant 的正文按空行还原成一条条 <msg>，正是
     QQ 适配器当初分条发送的那个边界。
 
-    user 消息原样返回——那是用户的话，本就不该有 <msg>（契约里 <msg>
-    只包"你说给用户听的话"）。已带 <msg> 的也不重复包（幂等）。
+    还原用哪份数据（PR #10 修）：
+    - **有 `parts`**（新落库的 assistant 行，store.append 的 sidecar）：直接按
+      分条数组逐条包裹——这是**严格的逆变换**，不再去猜 content 里的空行。
+      旧实现按 `\\n\\n` 切，而 chat.md 明确允许 `<msg>` 内含换行，于是正文里
+      的一个空行就被误当成"分条边界"；正文含 `<msg>` 时又因 `"<msg>" in content`
+      整段跳过包裹。三种情况实测全部往返失败，这里一并修掉。
+    - **无 `parts`**（旧行、或 role=user）：回落到旧启发式（`\\n\\n` 切 + 已带
+      `<msg>` 则不重复包）——有损，但只影响加列之前写入的历史，且保住了
+      既有幂等语义（见 test_context 的 already-tagged 用例）。
+
+    返回值必须是**纯净的 {role, content}**：只喂模型认得的字段，不能把
+    `parts` 一并带进请求体（严格网关会因未知字段 400）。
     """
-    if entry.get("role") != "assistant":
-        return entry
+    role = entry.get("role")
     content = entry.get("content", "")
-    if not content or "<msg>" in content:
-        return entry
-    parts = [p.strip() for p in content.split("\n\n") if p.strip()]
-    if not parts:
-        return entry
-    return {**entry, "content": "\n\n".join(f"<msg>{p}</msg>" for p in parts)}
+
+    if role == "assistant":
+        parts = entry.get("parts")
+        if isinstance(parts, list) and parts:
+            tagged = "\n\n".join(
+                f"<msg>{_escape_msg_tags(p)}</msg>" for p in parts
+            )
+            return {"role": "assistant", "content": tagged}
+        # 旧行降级：无分条信息，按空行启发式补（幂等守卫保持不变）
+        if content and "<msg>" not in content:
+            split = [p.strip() for p in content.split("\n\n") if p.strip()]
+            if split:
+                return {
+                    "role": "assistant",
+                    "content": "\n\n".join(f"<msg>{p}</msg>" for p in split),
+                }
+        return {"role": "assistant", "content": content}
+
+    # user（或其它角色）：不该有 <msg>，但也必须只留 role/content——
+    # 历史 entry 可能带了 parts/其它 sidecar 键，一并丢干净。
+    return {"role": role, "content": content}
 
 
 class ChatLLM:
@@ -171,11 +212,24 @@ class ChatLLM:
             trimmed = self._recent_history(history)
             # 补回 <msg> 标签再喂模型——历史正文在库里是纯文本，直接喂会让
             # 模型跟着裸文本走、丢掉输出契约（分条失效）。详见该函数 docstring。
-            messages.extend(_history_turn_for_model(m) for m in trimmed)
+            # 历史正文也转义系统块标记：历史里的旧伪造文本每轮都会被重喂，
+            # 不转义就等于每轮都给模型一次"这是用户说的，但长得像系统块"的
+            # 误导（escape 只动 <system_reminder，不影响助手回答的 <msg> 标签）。
+            messages.extend(
+                {
+                    "role": turn["role"],
+                    "content": escape_tag_markers(turn["content"]),
+                }
+                for turn in (_history_turn_for_model(m) for m in trimmed)
+            )
 
         # 动态块包在 <system_reminder> 里，贴在最新提问前面
         reminder = self.context.render_reminder(self.context.assemble("chat", session))
-        content = f"{reminder}\n{user_question}" if reminder else user_question
+        # 用户提问先转义可能冒充系统块的标记，再拼到动态块后面——否则用户
+        # 写一句 <system_reminder>…</system_reminder> 就能伪造系统提示
+        # （PR #10 High）。转义只动标记字符，用户的话其余照旧。
+        safe_question = escape_tag_markers(user_question)
+        content = f"{reminder}\n{safe_question}" if reminder else safe_question
 
         # 最新提问放在最末尾（会动部分）
         messages.append({"role": "user", "content": content})
