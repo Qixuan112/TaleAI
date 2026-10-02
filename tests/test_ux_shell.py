@@ -136,3 +136,32 @@ def test_nav_does_not_introduce_framework_to_index_or_logs():
         low = _page(name).lower()
         for m in ("vue", "react", "jquery", "cdn.", "unpkg.com", "jsdelivr"):
             assert m not in low, f"{name} 引了不该有的东西：{m!r}"
+
+
+# ---------- &newtale 重置会话（UX-02）----------
+
+
+def test_newtale_command_defined():
+    """&newtale 命令常量与判定函数存在。"""
+    page = _page("index.html")
+    assert "&newtale" in page, "页面没有 &newtale 命令"
+    assert re.search(r"function\s+isResetCommand", page), "没有命令判定函数"
+
+
+def test_newtale_sends_clear_action_not_content():
+    """&newtale 必须复用 clear 控制帧（action=clear），而不是当聊天发 content。
+
+    这是"会话号保持不变"的关键：clear 删消息、留会话行，session_id 不动。
+    """
+    page = _page("index.html")
+    # 命令分支里发的是 action=clear
+    assert re.search(r'action\s*:\s*"clear"', page), "&newtale 没有发 clear 帧"
+    # 判定函数在 send 里被用上（否则命令形同虚设）
+    assert re.search(r"isResetCommand\s*\(", page), "判定函数没被调用"
+
+
+def test_newtale_mentioned_in_placeholder():
+    """输入框提示里告诉用户有这么个命令——否则没人会发现。"""
+    page = _page("index.html")
+    assert "&newtale" in page
+    assert re.search(r"placeholder=[^>]*&newtale", page), "提示语里没提 &newtale"

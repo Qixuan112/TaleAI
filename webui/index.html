@@ -268,7 +268,7 @@
   <div id="messages"></div>
 
   <form id="composer">
-    <textarea id="input" placeholder="跟塔利说点什么…（Enter 发送，Shift+Enter 换行）" autofocus></textarea>
+    <textarea id="input" placeholder="跟塔利说点什么…（Enter 发送，Shift+Enter 换行；发 &newtale 重置会话）" autofocus></textarea>
     <button id="send" type="submit">发送</button>
   </form>
 </div>
@@ -435,9 +435,29 @@ function connect() {
 }
 
 // ---- 发送 --------------------------------------------------------------------
+
+// &newtale：整行命令，重置当前会话。
+// 语义 = "同一 session_id 就地清空"，正好是服务端已有的 clear 流程
+// （store.clear 就是删消息、留会话行）——所以这里不发聊天内容，改发 clear 帧。
+// 之所以做前端命令而不是后端：session_id 本就归前端管，后端没有"切换会话"的概念。
+var RESET_CMD = "&newtale";
+
+function isResetCommand(text) {
+  return (text || "").trim().toLowerCase() === RESET_CMD;
+}
+
 function send() {
   var text = inputEl.value.trim();
   if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+  // &newtale 是命令不是聊天：重置会话，不发给模型、不出现气泡。
+  // 单次即清（跟核弹钮的两下确认不同）——用户是**主动敲的命令**，不是误触。
+  if (isResetCommand(text)) {
+    inputEl.value = "";
+    ws.send(JSON.stringify({ action: "clear", session_id: SID }));
+    return;
+  }
+
   addBubble(text, "me");
   ws.send(JSON.stringify({ content: text, session_id: SID }));
   inputEl.value = "";
