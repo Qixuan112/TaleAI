@@ -37,13 +37,135 @@
     padding: 14px 20px;
     border-bottom: 1px solid var(--line);
     display: flex;
-    align-items: baseline;
+    align-items: center;
     gap: 10px;
   }
   header h1 { font-size: 16px; margin: 0; font-weight: 600; }
   header .status { font-size: 12px; color: var(--muted); }
   header .status.ok::before { content: "● "; color: #5fbf7f; }
   header .status.off::before { content: "● "; color: #d98b8b; }
+  header .spacer { flex: 1; }
+
+  /* ---- 核弹发射钮：3D 红钮嵌在金属底座里，外裹黄黑警示带 ---- */
+  .nuke {
+    --nuke: #d21f1f;            /* 钮面主红 */
+    --nuke-hi: #ff6a58;         /* 高光红 */
+    --nuke-dk: #6e0b0b;         /* 暗部 */
+    position: relative;
+    width: 46px; height: 46px; padding: 0;
+    border: 2px solid #260707;
+    border-radius: 50%;
+    cursor: pointer;
+    /* 底座：上方受光的金属碗，外圈一道亮边（光从上方来） */
+    background: radial-gradient(circle at 50% 34%,
+                #5c1616 0 44%, #330b0b 60%, #170404 80%, #2c0909 88%, #7a2626 100%);
+    box-shadow:
+      inset 0 3px 3px rgba(255,255,255,.22),   /* 上内缘亮 */
+      inset 0 -4px 8px rgba(0,0,0,.75),        /* 下内缘暗 */
+      inset 0 0 0 2px rgba(0,0,0,.35),
+      0 3px 6px rgba(0,0,0,.5),                /* 落地投影 */
+      0 7px 16px rgba(0,0,0,.32);
+    transition: transform .09s cubic-bezier(.3,.7,.4,1.2);
+  }
+
+  /* 黄黑警示带：45° 斜条 + 顶部光泽/底部压暗，做成有倒角的立体环 */
+  .nuke::before {
+    content: "";
+    position: absolute; inset: -7px;
+    border-radius: 50%;
+    /* 上层：顶部高光 → 底部阴影的球面罩；下层：斜条纹 */
+    background:
+      radial-gradient(circle at 50% 26%,
+                      rgba(255,255,255,.42) 0%, rgba(255,255,255,0) 46%,
+                      rgba(0,0,0,.5) 100%),
+      repeating-linear-gradient(45deg, #f5c518 0 9px, #141414 9px 18px);
+    box-shadow:
+      inset 0 2px 3px rgba(255,255,255,.35),
+      inset 0 -2px 4px rgba(0,0,0,.55),
+      0 1px 3px rgba(0,0,0,.55),
+      0 0 0 1.5px #0d0d0d;
+    /* 挖空中心：露出钮面，只留环带（数值 = 钮半径 23 + 边框 2 = 25） */
+    -webkit-mask: radial-gradient(circle, transparent 0 25px, #000 25px);
+            mask: radial-gradient(circle, transparent 0 25px, #000 25px);
+  }
+  .nuke:focus-visible { outline: 3px solid #ffb4a8; outline-offset: 6px; }
+
+  /* 钮盘：玻璃圆顶，嵌在底座里。待机时极缓呼吸，像通电待命 */
+  .nuke .cap {
+    position: absolute; inset: 8px; border-radius: 50%;
+    background: radial-gradient(circle at 50% 30%,
+                #ff9a86 0%, var(--nuke-hi) 20%, var(--nuke) 54%, var(--nuke-dk) 100%);
+    box-shadow:
+      inset 0 4px 5px rgba(255,255,255,.6),    /* 顶缘高光 */
+      inset 0 -8px 11px rgba(0,0,0,.55),       /* 底部压暗 */
+      inset 0 0 0 1px rgba(0,0,0,.25),
+      0 3px 6px rgba(0,0,0,.5),                /* 圆顶投进碗里的影 */
+      0 0 9px rgba(210,31,31,.7);
+    transition: transform .09s cubic-bezier(.3,.7,.4,1.2),
+                box-shadow .12s ease, filter .12s ease;
+    animation: nuke-swell 2.4s ease-in-out infinite;
+  }
+  /* 玻璃反光：左上一道弧形高光片，圆顶的"立体灵魂" */
+  .nuke .cap::after {
+    content: "";
+    position: absolute; left: 17%; top: 9%; width: 52%; height: 34%;
+    border-radius: 50%;
+    background: linear-gradient(to bottom,
+                rgba(255,255,255,.9), rgba(255,255,255,0));
+    filter: blur(1px);
+    pointer-events: none;
+  }
+  .nuke:hover .cap { filter: brightness(1.12); }
+
+  /* 按下：钮盘下沉进底座、发光收敛、整体微缩——"真的压进去了" */
+  .nuke:active { transform: scale(.95); }
+  .nuke:active .cap {
+    animation: none;
+    transform: translateY(3px) scale(.86);
+    filter: brightness(.9);
+    box-shadow:
+      inset 0 5px 9px rgba(0,0,0,.85),
+      inset 0 -2px 3px rgba(0,0,0,.4),
+      inset 0 0 0 1px rgba(0,0,0,.3),
+      0 1px 2px rgba(0,0,0,.4),
+      0 0 5px rgba(210,31,31,.45);
+  }
+  .nuke:disabled { filter: grayscale(.6) brightness(.8); cursor: default; }
+  .nuke:disabled .cap { animation: none; }
+  /* 待发状态：第一下按过后，警示环急闪红——"再按一下就真发射了" */
+  .nuke.armed::before {
+    background:
+      radial-gradient(circle at 50% 26%,
+                      rgba(255,255,255,.4) 0%, rgba(255,255,255,0) 46%,
+                      rgba(0,0,0,.5) 100%),
+      repeating-linear-gradient(45deg, #ff3b2f 0 9px, #100000 9px 18px);
+    animation: nuke-alarm .5s steps(2, jump-none) infinite;
+  }
+  .nuke.armed .cap {
+    animation: none;
+    box-shadow:
+      inset 0 4px 5px rgba(255,255,255,.6),
+      inset 0 -8px 11px rgba(0,0,0,.55),
+      0 3px 6px rgba(0,0,0,.5),
+      0 0 24px rgba(255,40,40,1);
+  }
+  @keyframes nuke-alarm {
+    0%, 100% { filter: none; }
+    50%      { filter: brightness(1.5) saturate(1.4); }
+  }
+  @keyframes nuke-swell {
+    0%, 100% { box-shadow: inset 0 4px 5px rgba(255,255,255,.6),
+                            inset 0 -8px 11px rgba(0,0,0,.55),
+                            inset 0 0 0 1px rgba(0,0,0,.25),
+                            0 3px 6px rgba(0,0,0,.5),
+                            0 0 8px rgba(210,31,31,.5); }
+    50%      { box-shadow: inset 0 4px 5px rgba(255,255,255,.6),
+                            inset 0 -8px 11px rgba(0,0,0,.55),
+                            inset 0 0 0 1px rgba(0,0,0,.25),
+                            0 3px 6px rgba(0,0,0,.5),
+                            0 0 20px rgba(255,90,77,.95); }
+  }
+  @media (prefers-reduced-motion: reduce) { .nuke .cap { animation: none; } }
 
   #messages {
     flex: 1;
@@ -111,6 +233,11 @@
   <header>
     <h1>塔利</h1>
     <span id="status" class="status off">连接中…</span>
+    <span class="spacer"></span>
+    <button id="clear" class="nuke" type="button"
+            aria-label="清空本次聊天历史" title="清空本次聊天历史">
+      <span class="cap"></span>
+    </button>
   </header>
 
   <div id="messages"></div>
@@ -142,6 +269,7 @@ var formEl = document.getElementById("composer");
 var inputEl = document.getElementById("input");
 var sendEl = document.getElementById("send");
 var statusEl = document.getElementById("status");
+var clearEl = document.getElementById("clear");
 
 function setStatus(text, ok) {
   statusEl.textContent = text;
@@ -169,6 +297,15 @@ function addToolNote(count) {
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
+// 居中的一条系统提示（清空回执之类），跟工具提示同一视觉层级
+function addSystemNote(text) {
+  var note = document.createElement("div");
+  note.className = "tool-note";
+  note.textContent = "〔" + text + "〕";
+  messagesEl.appendChild(note);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
 // ---- WebSocket ---------------------------------------------------------------
 var ws = null;
 var pending = null;   // 等待回复时占位的那条气泡
@@ -184,6 +321,8 @@ function connect() {
   ws.onclose = function () {
     setStatus("已断开，重连中…", false);
     sendEl.disabled = true;
+    clearEl.disabled = false;   // 别让清空钮卡在禁用（发送时禁的）
+    disarm();
     setTimeout(connect, 1500);   // 断线自动重连
   };
   ws.onerror = function () { setStatus("连接出错", false); };
@@ -197,6 +336,21 @@ function connect() {
       (data.messages || []).forEach(function (m) {
         addBubble(m.content, m.role === "user" ? "me" : "tale");
       });
+      return;
+    }
+
+    // 清空回执：服务端删完库，前端把气泡一并抹掉
+    if (data.type === "cleared") {
+      messagesEl.innerHTML = "";
+      clearEl.disabled = false;
+      disarm();   // 发射完，退出待发状态
+      if (!data.ok) {
+        addSystemNote("清空失败，再看看日志");
+      } else if (!data.deleted) {
+        addSystemNote("本来就没有历史");
+      } else {
+        addSystemNote("已清空 " + data.deleted + " 条，重新开始");
+      }
       return;
     }
 
@@ -230,6 +384,41 @@ function send() {
 formEl.addEventListener("submit", function (e) {
   e.preventDefault();
   send();
+});
+
+// 清空本次会话历史：两下确认。
+//   第一下 → 按钮进入"待发"（警示环急闪红），弹一行提示；
+//   第二下 → 真的发 clear 帧，服务端删库，等 cleared 回执到了才抹页面。
+//   3 秒不按第二下 → 自动解除待发（防止手滑一直挂着）。
+// 为什么不用浏览器的原生确认框：它在这个内嵌浏览器里会被静默吞掉（返回 false），
+// 按钮点了没反应——这正是"没办法真正重置"的原因。改成页内两下确认，既可靠
+// 又更贴"发射钮"的调性。
+var armed = false;
+var armTimer = null;
+
+function disarm() {
+  armed = false;
+  clearEl.classList.remove("armed");
+  clearEl.title = "清空本次聊天历史（按两下）";
+  clearTimeout(armTimer);
+}
+
+clearEl.addEventListener("click", function () {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+  if (!armed) {
+    armed = true;
+    clearEl.classList.add("armed");
+    clearEl.title = "再按一下，就真的清空";
+    addSystemNote("已待发：再按一次就清空本次聊天");
+    armTimer = setTimeout(disarm, 3000);
+    return;
+  }
+
+  // 第二下：真清
+  clearTimeout(armTimer);
+  clearEl.disabled = true;
+  ws.send(JSON.stringify({ action: "clear", session_id: SID }));
 });
 
 // Enter 发送，Shift+Enter 换行

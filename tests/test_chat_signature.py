@@ -52,8 +52,8 @@ def make_bot(script):
     bot.registry = reg
     bot.executor = ToolExecutor(reg, PermissionGuard(reg))
     bot.max_agent_steps = 3
-    bot.history_max_turns = 40
-    bot.history_trim_to = 10
+    bot.history_keep_messages = 10
+    bot.history_lookback_extra = 5
     bot.fallback_text = "（兜底）"
     bot.client = FakeClient(script)
     return bot

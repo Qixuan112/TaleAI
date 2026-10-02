@@ -64,12 +64,14 @@ _CONFIG_FIELDS = (
         help="服务商提供的模型标识",
     ),
     FieldSpec(
-        key="llm.history_max_turns", label="历史窗口（回合）", type="number",
-        default=40, help="超过这个回合数才开始裁剪",
+        key="llm.history_keep_messages", label="历史窗口（条）", type="number",
+        default=10,
+        help="每次请求保留最新这么多条消息（每条消息 = 1）",
     ),
     FieldSpec(
-        key="llm.history_trim_to", label="裁剪后保留（回合）", type="number",
-        default=10, help="弹簧窗口：触发裁剪后保留的回合数",
+        key="llm.history_lookback_extra", label="窗口外多带（条）", type="number",
+        default=5,
+        help="在窗口之外再往前多带几条旧消息，让边界不硬切、上下文更连贯",
     ),
     FieldSpec(
         key="llm.max_agent_steps", label="工具调用轮次上限", type="number",

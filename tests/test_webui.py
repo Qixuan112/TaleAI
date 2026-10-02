@@ -130,3 +130,27 @@ def test_page_uses_no_frontend_framework(page):
     # 也不该从 CDN 拉脚本
     assert "cdn." not in low and "unpkg.com" not in low and "jsdelivr" not in low
 
+
+def test_page_has_clear_history_button(page):
+    """网页上要有「清空历史」入口。"""
+    assert re.search(r'id="clear"', page), "没有清空按钮"
+    assert "清空" in page
+
+
+def test_page_clear_sends_action_clear_matching_adapter(page):
+    """清空按钮发出的帧形状必须与适配器的控制帧契约一致（action=clear）。"""
+    assert re.search(r'action\s*:\s*"clear"', page), "没有发 action=clear"
+    assert re.search(r'data\.type\s*===\s*"cleared"', page), "没有处理 cleared 回执"
+
+
+def test_page_clear_is_two_press_confirmed(page):
+    """清空不可撤销——用页内两下确认防误触。
+
+    为什么不用浏览器的原生确认框：它在这个内嵌浏览器里会被静默吞掉（返回
+    false），按钮点了没反应——曾因此"清不掉历史"。所以必须走页内两下确认：
+    第一下待发（armed），第二下才真发 action=clear。
+    """
+    assert re.search(r'\barmed\b', page), "没有两下确认的状态"
+    assert re.search(r'classList\.add\(\s*"armed"', page), "没有进入待发态"
+    assert re.search(r'action\s*:\s*"clear"', page)
+

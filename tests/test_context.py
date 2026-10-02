@@ -106,9 +106,9 @@ def make_bot():
     bot = ChatLLM.__new__(ChatLLM)
     bot.persona = Persona()
     bot.context = make_assembler()
-    # 历史裁剪阈值（__init__ 里从 config 读，这里给默认值）
-    bot.history_max_turns = 40
-    bot.history_trim_to = 10
+    # 历史窗口（__init__ 里从 config 读，这里给默认值）
+    bot.history_keep_messages = 10
+    bot.history_lookback_extra = 5
     return bot
 
 
@@ -146,8 +146,10 @@ def test_reminder_not_in_history_messages():
     ]
     msgs = bot.assemble_messages("今天星期几？", history)
     body = [m for m in msgs if m["role"] != "system"]
-    assert body[0]["content"] == "你好"  # 历史原样
-    assert body[1]["content"] == "哟，老板来啦~"
+    assert body[0]["content"] == "你好"  # 历史 user 原样
+    # 历史 assistant 会被补回 <msg>（见 test_history_assistant_gets_msg_tags_restored），
+    # 本条只关心「没有 reminder 漏进历史」——正文本身（去掉标签后）不变即可。
+    assert body[1]["content"] == "<msg>哟，老板来啦~</msg>"
     assert "system_reminder" not in body[0]["content"]
     assert "system_reminder" not in body[1]["content"]
     assert "system_reminder" in body[-1]["content"]
@@ -173,3 +175,114 @@ def test_repeated_calls_produce_identical_reminder():
     a = bot.assemble_messages("一")[-1]["content"]
     b = bot.assemble_messages("一")[-1]["content"]
     assert a == b
+
+
+# ---------- 历史进模型时补回 <msg>（真实模型分条失效的修复） ----------
+
+
+def test_history_assistant_gets_msg_tags_restored():
+    """历史里的 assistant 裸文本要补回 <msg> 再喂模型。
+
+    存储按原文存纯文本（记忆/WebUI 都用它），但模型学格式看的是前文——
+    裸文本历史会让模型跟着不写 <msg>，QQ 分条就失效（实测裸文本 11/15 轮
+    丢契约，补回标签 0/15）。这条钉死「存储形态 ≠ 模型形态」。
+    """
+    bot = make_bot()
+    history = [
+        {"role": "user", "content": "在吗"},
+        {"role": "assistant", "content": "在呢~\n\n咋了"},
+    ]
+    msgs = bot.assemble_messages("在忙啥", history)
+    body = [m for m in msgs if m["role"] != "system"]
+    # 历史 user 原样，不被打标签
+    assert body[0]["content"] == "在吗"
+    # 历史 assistant 的两段被分别包上 <msg>
+    assert body[1]["content"] == "<msg>在呢~</msg>\n\n<msg>咋了</msg>"
+    # 最新提问是用户的话，也不带 <msg>
+    assert "<msg>" not in body[-1]["content"]
+
+
+def test_history_restore_does_not_mutate_caller_list():
+    """补标签是新造 dict，绝不就地改动调用方的 history（配套 persist=False）。"""
+    bot = make_bot()
+    history = [{"role": "assistant", "content": "在呢~\n\n咋了"}]
+    snapshot = [dict(m) for m in history]
+    bot.assemble_messages("在吗", history)
+    assert history == snapshot, "history 被就地改了——补标签必须造新 dict"
+
+
+def test_history_already_tagged_is_left_alone():
+    """已带 <msg> 的历史是幂等的，不再重复包一层。"""
+    bot = make_bot()
+    history = [{"role": "assistant", "content": "<msg>早</msg>"}]
+    msgs = bot.assemble_messages("早", history)
+    body = [m for m in msgs if m["role"] != "system"]
+    assert body[0]["content"] == "<msg>早</msg>"
+
+
+# ---------- 滑动窗口：最新 N 条 + 往前多带 M 条 ----------
+
+
+def test_window_keeps_newest_plus_extra():
+    """保留最新 N 条，再往前多带 M 条——窗口外的旧消息不全丢，边界不硬切。"""
+    bot = make_bot()
+    bot.history_keep_messages = 4
+    bot.history_lookback_extra = 2
+    # 6 轮 = 12 条，应留 4+2 = 6 条（最近 3 轮的 6 条消息）
+    history = []
+    for i in range(6):
+        history.append({"role": "user", "content": f"问{i}"})
+        history.append({"role": "assistant", "content": f"答{i}"})
+    msgs = bot.assemble_messages("新问题", history)
+    body = [m for m in msgs if m["role"] != "system"]
+    assert [m["content"] for m in body[:-1]] == [
+        "问3", "<msg>答3</msg>", "问4", "<msg>答4</msg>", "问5", "<msg>答5</msg>",
+    ]
+    assert body[-1]["content"].endswith("新问题")
+
+
+def test_window_extra_zero_is_plain_sliding():
+    """M=0 就是纯滑动窗口：只留最新 N 条。"""
+    bot = make_bot()
+    bot.history_keep_messages = 3
+    bot.history_lookback_extra = 0
+    history = [{"role": "user", "content": f"m{i}"} for i in range(10)]
+    msgs = bot.assemble_messages("问", history)
+    body = [m for m in msgs if m["role"] != "system"]
+    assert [m["content"] for m in body[:-1]] == ["m7", "m8", "m9"]
+
+
+def test_window_under_limit_keeps_everything():
+    """没超窗口就不裁——短会话原样带上。"""
+    bot = make_bot()
+    bot.history_keep_messages = 10
+    bot.history_lookback_extra = 5
+    history = [
+        {"role": "user", "content": "问1"},
+        {"role": "assistant", "content": "答1"},
+    ]
+    msgs = bot.assemble_messages("问2", history)
+    body = [m for m in msgs if m["role"] != "system"]
+    assert [m["content"] for m in body[:-1]] == ["问1", "<msg>答1</msg>"]
+
+
+def test_window_zero_zero_means_unlimited():
+    """两个值都 0 = 不限（调试用）：历史全带上。"""
+    bot = make_bot()
+    bot.history_keep_messages = 0
+    bot.history_lookback_extra = 0
+    history = [{"role": "x", "content": f"m{i}"} for i in range(30)]
+    msgs = bot.assemble_messages("问", history)
+    body = [m for m in msgs if m["role"] != "system"]
+    assert len(body) == 31  # 30 条历史 + 1 条最新提问
+
+
+def test_window_does_not_mutate_caller_history():
+    """窗口只读切片，不改调用方的 list。"""
+    bot = make_bot()
+    bot.history_keep_messages = 2
+    bot.history_lookback_extra = 1
+    history = [{"role": "user", "content": f"m{i}"} for i in range(10)]
+    snapshot = [dict(m) for m in history]
+    bot.assemble_messages("问", history)
+    assert history == snapshot

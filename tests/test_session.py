@@ -192,6 +192,34 @@ def test_sessions_are_isolated(store):
     assert [m["content"] for m in store.history("other")] == ["属于 other"]
 
 
+# ---------- 清空会话历史 ----------
+
+
+def test_clear_removes_only_that_session(store):
+    """清空只动目标会话，别的会话不受影响。"""
+    store.ensure_session("other")
+    store.append("s1", "user", "一")
+    store.append("s1", "assistant", "二")
+    store.append("other", "user", "别动我")
+
+    assert store.clear("s1") == 2  # 返回删掉的条数
+    assert store.history("s1") == []
+    assert store.history("other") == [{"role": "user", "content": "别动我"}]
+
+
+def test_clear_keeps_the_session_row(store):
+    """清空历史但保留会话本身——清了还是同一个会话（platform/kind/owner 不该丢）。"""
+    store.append("s1", "user", "一")
+    store.clear("s1")
+    assert store.count("s1") == 0
+    assert [s["id"] for s in store.sessions()] == ["s1"]  # 会话行还在
+
+
+def test_clear_empty_returns_zero(store):
+    """本来就空的会话，清空返回 0，不报错。"""
+    assert store.clear("s1") == 0
+
+
 # ---------- WAL 与生命周期 ----------
 
 
