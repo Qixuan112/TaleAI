@@ -155,6 +155,20 @@ def test_page_clear_is_two_press_confirmed(page):
     assert re.search(r'action\s*:\s*"clear"', page)
 
 
+def test_page_renders_history_parts_as_separate_bubbles(page):
+    """历史帧按分条（parts）渲染成多个气泡——否则刷新后多段回复合成一个。
+
+    服务端 history 帧的每条 assistant 带 parts 数组时，前端要逐条 addBubble；
+    没有 parts 的行（user / 旧行）回落单气泡。
+    """
+    assert re.search(r"\.parts\b", page), "历史渲染没有引用 parts"
+    assert re.search(r"parts\s*\.\s*forEach", page), "没有按 parts 逐条渲染"
+    # 回落分支仍在（旧行优雅降级）
+    assert "addBubble(m.content" in page or re.search(r"addBubble\(m\.content", page)
+    # 仍是 textContent（XSS 纪律不破）
+    assert "textContent" in page
+
+
 # ---------- 日志调试页 logs.html（SSE 实时日志） ----------
 
 

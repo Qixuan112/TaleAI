@@ -114,6 +114,10 @@ _PLATFORM_FIELDS = (
         key="qq.port", label="QQ 适配器端口", type="number", default=8866,
         help="SnowLuma 的 wsClients.url 要指向这个端口",
     ),
+    FieldSpec(
+        key="qq.access_token", label="QQ 访问令牌", type="text", default="",
+        help="留空=不校验（单机自用）；填了则握手须带同一 token，防止别人顶掉 SnowLuma",
+    ),
 )
 
 # 插件域：插件清单在运行时由 PluginRegistry 汇总，面板按插件动态生成开关；

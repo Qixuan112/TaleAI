@@ -114,9 +114,70 @@ def test_connection_registers_and_cleans_up_session():
 def test_two_sessions_are_tracked_separately():
     a = WebSocketAdapter()
     client = TestClient(a.app)
-    with client.websocket_connect("/ws?session_id=a"):
-        with client.websocket_connect("/ws?session_id=b"):
-            assert set(a.connected_sessions()) == {"a", "b"}
+    with client.websocket_connect("/ws?session_id=web:a"):
+        with client.websocket_connect("/ws?session_id=web:b"):
+            assert set(a.connected_sessions()) == {"web:a", "web:b"}
+
+
+# ---------- 端点鉴权（PR #10 High） ----------
+
+
+def test_non_local_origin_is_rejected():
+    """别的网页能连 /ws（WS 不受 CORS 限制）→ 必须在握手前拒掉。"""
+    from starlette.websockets import WebSocketDisconnect as StarletteWSD
+
+    a = WebSocketAdapter()
+    client = TestClient(a.app)
+    with pytest.raises(StarletteWSD):
+        with client.websocket_connect(
+            "/ws?session_id=web:local", headers={"Origin": "https://evil.example"}
+        ):
+            pass
+    assert a.connected_sessions() == []  # 没登记连接
+
+
+def test_local_origin_is_allowed():
+    a = WebSocketAdapter()
+    client = TestClient(a.app)
+    with client.websocket_connect(
+        "/ws?session_id=web:local", headers={"Origin": "http://127.0.0.1:8000"}
+    ):
+        assert "web:local" in a.connected_sessions()
+
+
+def test_missing_origin_is_allowed():
+    """非浏览器客户端（curl / 测试）没有 Origin → 放行（拦的是别的网页）。"""
+    a = WebSocketAdapter()
+    with TestClient(a.app).websocket_connect("/ws?session_id=web:local"):
+        assert "web:local" in a.connected_sessions()
+
+
+def test_cross_platform_session_id_is_downgraded():
+    """客户端传 cli:/qq: 这类可预测的跨平台 id → 回落默认 web: 会话。"""
+    a = WebSocketAdapter()
+    client = TestClient(a.app)
+    with client.websocket_connect("/ws?session_id=cli:local"):
+        assert "cli:local" not in a.connected_sessions()
+        assert "web:local" in a.connected_sessions()
+
+
+def test_owner_is_always_local():
+    """owner 固定 local，不读客户端字段（旧实现第一条消息就能写死任意 owner）。"""
+    a = WebSocketAdapter()
+    m = a.normalize({"content": "x", "owner": "evil", "session_id": "web:local"})
+    assert m.owner == "local"
+
+
+def test_bad_frame_does_not_drop_connection():
+    """一条非法帧只被忽略，连接保持可用（旧实现会拆掉整条连接）。"""
+    a = WebSocketAdapter()
+    client = TestClient(a.app)
+    with client.websocket_connect("/ws?session_id=web:local") as ws:
+        ws.send_text("这不是 JSON")
+        ws.send_text("[1, 2, 3]")  # 非 object
+        ws.send_json({"content": "还在", "session_id": "web:local"})  # 仍能发
+        msg = a._inbox.get_nowait()
+        assert msg.content == "还在"
 
 
 # ---------- 发：Reply → 连接 ----------

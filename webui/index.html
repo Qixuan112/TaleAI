@@ -383,7 +383,14 @@ function connect() {
     if (data.type === "history") {
       messagesEl.innerHTML = "";
       (data.messages || []).forEach(function (m) {
-        addBubble(m.content, m.role === "user" ? "me" : "tale");
+        var who = m.role === "user" ? "me" : "tale";
+        // assistant 行若带了分条数组（parts），每条一个气泡——否则刷新后
+        // 一次多段的回复会挤成一个气泡。旧行/用户消息没有 parts，回落单气泡。
+        if (m.parts && m.parts.length) {
+          m.parts.forEach(function (p) { addBubble(p, who); });
+        } else {
+          addBubble(m.content, who);
+        }
       });
       return;
     }

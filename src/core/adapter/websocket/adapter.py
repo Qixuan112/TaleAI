@@ -22,6 +22,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Callable
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import RedirectResponse, StreamingResponse
@@ -39,6 +40,16 @@ WEBUI_DIR = Path(__file__).resolve().parents[4] / "webui"
 
 # 没带 session_id 时的默认会话——裸连（比如直接 ws 客户端测试）也能用
 DEFAULT_SESSION_ID = "web:local"
+
+# WebUI 会话 id 的固定前缀。服务端只认这个前缀，客户端不能借 `/ws` 去读/写
+# 别的平台的会话（cli:local、qq:p<号> …）——那些 id 是可预测的（PR #10）。
+WEB_SESSION_PREFIX = "web:"
+
+# 允许的 Origin 主机（浏览器 WebSocket 不受 CORS 限制，必须自己查）。
+# 只放本机：M0 是单机自用服务，页面和 WS 同源。缺 Origin（非浏览器客户端，
+# 如测试/脚本）也放行——拦截的目标是"别的网页"，不是命令行。
+_ALLOWED_ORIGIN_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]"}
+
 
 
 class WebSocketAdapter(AdapterBase):
@@ -82,20 +93,55 @@ class WebSocketAdapter(AdapterBase):
         session_id 缺省用默认值；id / ts 服务端生成（客户端不该操心全局唯一性）。
         """
         content = str(raw.get("content", "")).strip()
-        session_id = str(raw.get("session_id") or DEFAULT_SESSION_ID)
+        session_id = self._web_session_id(str(raw.get("session_id") or ""))
 
         return Message(
             id=uuid.uuid4().hex,
             platform=self.name,
             session_id=session_id,
-            # WebUI 是本人单机使用，owner 固定 local（记忆隔离维度，§十八-4）
-            owner=str(raw.get("owner") or "local"),
+            # WebUI 是本人单机使用，owner **固定** local（记忆隔离维度，§十八-4）。
+            # 曾经读客户端的 owner 字段——叠加 /ws 无鉴权时，第一条消息就能把
+            # 会话 owner 永久写成任意字符串（PR #10）。这里是 WebUI 侧，就该是 local。
+            owner="local",
             direction="in",
             role="user",
             content=content,
             ts=time.time(),
             meta={},
         )
+
+    def _web_session_id(self, raw_id: str) -> str:
+        """把客户端给的 id 约束到 `web:` 前缀内，否则回落默认会话。
+
+        为什么：`/ws` 不校验来源时，客户端能传 `cli:local` / `qq:p<QQ号>` 这类
+        可预测的跨平台 id，去读/清空/写入**别的平台**的会话（PR #10）。只认
+        `web:` 前缀，就把 WebUI 关在它自己那一小片会话里。
+        """
+        if raw_id.startswith(WEB_SESSION_PREFIX) and raw_id != WEB_SESSION_PREFIX:
+            return raw_id
+        if raw_id:
+            logger.warning("拒绝非 web: 前缀的会话 id %r，回落默认会话", raw_id)
+        return DEFAULT_SESSION_ID
+
+    def _origin_allowed(self, websocket: WebSocket) -> bool:
+        """握手来源校验：只放行本机 Origin（缺 Origin 放行，给脚本/测试用）。
+
+        为什么必须自己查：浏览器的 WebSocket **不受同源策略/CORS 限制**，本机
+        任意网页都能 `new WebSocket("ws://127.0.0.1:8000/ws?session_id=...")`
+        去连、读历史、清空、甚至写消息烧钱（PR #10）。所以要在 accept 之前
+        看 Origin 头，不是本机就拒。
+
+        **鉴权接缝**：M0 的鉴权就这一层。将来要远程访问时，在这里追加
+        token / Cookie 校验即可，调用点（ws_endpoint）不用动。
+        """
+        origin = websocket.headers.get("origin")
+        if not origin:
+            return True  # 非浏览器客户端（curl / 测试 / 原生 app）没有 Origin
+        try:
+            host = urlparse(origin).hostname
+        except ValueError:
+            return False
+        return host in _ALLOWED_ORIGIN_HOSTS
 
     # ---------- 发：Reply → 连接 ----------
 
@@ -172,22 +218,48 @@ class WebSocketAdapter(AdapterBase):
 
         @app.websocket("/ws")
         async def ws_endpoint(websocket: WebSocket) -> None:
+            # 来源校验必须在 accept 之前：拒绝就关，既不推历史也不登记连接。
+            # 1008 = policy violation（WS 关闭码约定）。
+            if not self._origin_allowed(websocket):
+                logger.warning(
+                    "拒绝非本机 Origin 的 /ws 连接：%r",
+                    websocket.headers.get("origin"),
+                )
+                await websocket.close(code=1008)
+                return
             await websocket.accept()
-            # 会话 ID 从查询参数取；刷新页面重连会带同一个 ID，历史接得上
-            session_id = websocket.query_params.get("session_id") or DEFAULT_SESSION_ID
+            # 会话 ID 从查询参数取（刷新重连带同一个 ID，历史接得上），
+            # 但只认 web: 前缀——不认就回落默认，堵住跨平台会话注入。
+            session_id = self._web_session_id(
+                websocket.query_params.get("session_id") or ""
+            )
             self._connections[session_id] = websocket
             logger.info("WebUI 已连接：session=%s", session_id)
             # 先把该会话的历史推过去——否则刷新后页面是空的（M0 验收⑤）
             await self._push_history(websocket, session_id)
             try:
                 while True:
-                    raw = await websocket.receive_json()
+                    # 按帧 try：一条坏帧（非法 JSON / 非 object）只丢这一条，
+                    # 不能让它拆掉整条连接（PR #10）。receive_json 对非法 JSON
+                    # 会抛，所以这里连"取帧"一起保护。
+                    try:
+                        raw = await websocket.receive_json()
+                    except WebSocketDisconnect:
+                        raise
+                    except Exception:
+                        logger.warning(
+                            "收到无法解析的帧，已忽略：session=%s", session_id
+                        )
+                        continue
+                    if not isinstance(raw, dict):
+                        logger.warning("收到非对象帧，已忽略：session=%s", session_id)
+                        continue
                     # 控制帧（清空历史）不是聊天消息，先分流——
                     # 它带 action 字段，normalize 会把它当空内容丢掉。
-                    if isinstance(raw, dict) and raw.get("action") == "clear":
+                    if raw.get("action") == "clear":
                         await self._clear_and_reply(websocket, session_id)
                         continue
-                    message = self.normalize({**raw, "session_id": session_id})
+                    message = self.normalize(raw)
                     if not message.content:
                         continue  # 空消息不发请求（跟 CLI 的空行一致）
                     self._deliver(message)
