@@ -188,14 +188,19 @@ class QQAdapter(AdapterBase):
         if not message.content:
             return  # 纯图片/表情等无文本——M0 模型看不到，跳过
 
-        # 群聊过滤：只在被 @ 时响应。
+        # "有没有 @ 我"是**平台事实**（得知道 bot_id），只有这里判得了。
+        # 但"要不要因此开口"是**唤醒策略**（什么范围生效、什么算叫它），
+        # 那是跨平台配置、放 handle_message 统管（core/wake.py）。
+        # 所以这里不再自行丢弃未 @ 的群消息，只把结论标进 message.addressed，
+        # 交给前台门——这样"未唤醒但存进历史"才做得到（UX-03）。
         #
-        # 为什么必须过滤：OneBot 的反向 WS 是全局的，接上就会收到该账号能看到的
-        # **所有**群消息。在活跃群里逐条回复 = 刷屏 + 烧钱 + 被踢。私聊不需要 @
-        # （1:1 会话，有人在说话就是在跟我说话）。
-        if message.session_type == "group" and not self._mentions_bot(message):
-            logger.debug("群聊未 @ 我，忽略：session=%s", message.session_id)
-            return
+        # 私聊不设 addressed：1:1 会话本就"在对我说"，由唤醒策略的 scope 决定
+        # 它要不要过门（默认 group 范围下根本不过门）。
+        if message.session_type == "group":
+            message.addressed = self._mentions_bot(message)
+            if not message.addressed:
+                logger.debug("群聊未 @ 我：session=%s（交给前台按唤醒策略处理）",
+                             message.session_id)
 
         self._deliver(self._strip_bot_mention(message))
 

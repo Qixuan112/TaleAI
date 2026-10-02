@@ -29,6 +29,7 @@ from core.log import Logging
 from core.log_stream import LogStream, StreamLogHandler
 from core.plugin.registry import PluginRegistry
 from core.session.store import SessionStore
+from core.wake import WakePolicy, load_wake_policy
 
 logger = logging.getLogger(__name__)
 
@@ -75,10 +76,11 @@ async def handle_message(
     store: SessionStore,
     bot,
     bus: EventBus,
+    wake: "WakePolicy | None" = None,
 ) -> Reply | None:
     """处理一条入站消息：§18.1 第 3~9 步。
 
-    返回发给用户的 Reply；被忽略（空白/平台不认识/落库失败）时返回 None。
+    返回发给用户的 Reply；被忽略（空白/平台不认识/未唤醒/落库失败）时返回 None。
 
     为什么是 async：第 6 步要 `await` 模型调用。它必须 await `run_loop()`
     而不是调同步的 `chat()`——后者内部 `asyncio.run()`，在已在跑的事件循环里
@@ -88,6 +90,29 @@ async def handle_message(
 
     # 空白消息：不发请求、不落库（跟 CLI 的空行一致，省一次无意义调用）
     if not message.content.strip():
+        return None
+
+    # 唤醒门（§UX-03）：群里没叫它 → 存进历史但不回。
+    #
+    # 位置讲究：放在空白守卫之后、路由之前。理由——
+    # ① 在空白之后再判，空消息不会先落库（空白消息本就不该进历史）；
+    # ② 在路由之前判，未唤醒消息不发请求、不读历史、不建"回合"；
+    # ③ 但**仍要落库**（用户定："存进历史但不回"）——保住记忆原始素材。
+    # 门本身是纯代码（core/wake.py），不经过模型：让模型自己判断"叫没叫我"
+    # 等于把确定性的事交给不确定的 LLM（§十二 定论）。
+    policy = wake if wake is not None else load_wake_policy()
+    if policy.gates(message.session_type) and not policy.is_woken(
+        message.content, message.addressed
+    ):
+        try:
+            store.ensure_session(
+                session_id, platform=message.platform, owner=message.owner,
+                kind=message.session_type or "private",
+            )
+            store.append(session_id, "user", message.content)
+        except Exception:
+            logger.exception("未唤醒消息落库失败，跳过")
+        logger.debug("群聊未唤醒，已存库但不回：session=%s", session_id)
         return None
 
     # 第 3 步：Router 定位会话。M0 只是一个"内循环"查表——确认平台认识，
@@ -176,11 +201,15 @@ async def serve_forever(
     store: SessionStore,
     bot,
     bus: EventBus,
+    wake: "WakePolicy | None" = None,
 ) -> None:
     """常驻前台循环：每个适配器一个 recv 协程（§18.5「每平台 1 个 recv 协程」）。
 
     取消（Ctrl-C / 进程退出）时整体停下并向上抛 CancelledError。
     """
+    # 唤醒策略启动时读一次（§19-13：配置改动重启生效，不做热加载）。
+    # 传 None 时 handle_message 会自己按消息读——测试/裸调用能走，但服务里用的是这份。
+    policy = wake if wake is not None else load_wake_policy()
 
     async def pump(adapter: AdapterBase) -> None:
         while True:
@@ -189,7 +218,8 @@ async def serve_forever(
             # 这里再兜一层，保证单条消息的意外绝不终止整个前台循环。
             try:
                 await handle_message(
-                    message, router=router, store=store, bot=bot, bus=bus
+                    message, router=router, store=store, bot=bot, bus=bus,
+                    wake=policy,
                 )
             except Exception:
                 logger.exception("处理消息时发生未预期的错误，已跳过这条")
@@ -292,9 +322,12 @@ async def _serve() -> None:
                 port, port)
     try:
         # 第 9 步：把适配器挂成常驻任务，然后前台循环等消息
+        wake = load_wake_policy()
+        logger.info("唤醒策略：范围=%s 关键词=%s", wake.scope, list(wake.words) or "（无）")
         await asyncio.gather(
             *(a.start() for a in adapters),
-            serve_forever(adapters, router=router, store=store, bot=bot, bus=bus),
+            serve_forever(adapters, router=router, store=store, bot=bot, bus=bus,
+                          wake=wake),
         )
     finally:
         root.removeHandler(mirror)

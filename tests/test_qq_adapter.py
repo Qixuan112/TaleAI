@@ -255,17 +255,21 @@ def group_event_plain(user_id=20002000, text="今天天气不错"):
     }
 
 
-def test_group_message_without_at_is_ignored():
-    """群聊没 @ 机器人 → 不响应。否则在活跃群里会疯狂刷屏 + 烧钱。"""
+def test_group_message_without_at_is_delivered_with_addressed_false():
+    """群聊没 @ 机器人 → **仍投递**，只把 addressed 标成 False。
+
+    UX-03 改了这里：适配器不再自行丢弃未 @ 的群消息（那样"未唤醒也存进历史"
+    就无从谈起），改由前台按唤醒策略决定——所以适配器只给平台事实。
+    """
     a = QQAdapter()
     a.bot_id = "10001"
     with TestClient(a.app).websocket_connect(
         "/qq", headers={"X-Self-ID": "10001"}
     ) as ws:
         ws.send_json(group_event_plain(text="别人在聊天"))
-        ws.send_json(group_event_at(text=" @我了才该回"))
         m = _drain(a)
-    assert "别人在聊天" not in m.content
+    assert m.content == "别人在聊天"
+    assert m.addressed is False
 
 
 def test_group_message_with_at_is_answered():
@@ -276,6 +280,7 @@ def test_group_message_with_at_is_answered():
         ws.send_json(group_event_at())
         m = _drain(a)
     assert m.session_id == "qq:g30003000"
+    assert m.addressed is True
 
 
 def test_at_mention_is_stripped_from_content():
@@ -312,10 +317,11 @@ def test_group_at_via_cq_string_also_recognized():
         ws.send_json(ev)
         m = _drain(a)
     assert m.session_id == "qq:g30003000"
+    assert m.addressed is True
 
 
-def test_group_at_other_person_is_ignored():
-    """@ 的是别人不是机器人 → 不响应。"""
+def test_group_at_other_person_marks_not_addressed():
+    """@ 的是别人不是机器人 → addressed=False（前台会按唤醒策略决定回不回）。"""
     a = QQAdapter()
     with TestClient(a.app).websocket_connect(
         "/qq", headers={"X-Self-ID": "10001"}
@@ -324,6 +330,5 @@ def test_group_at_other_person_is_ignored():
         ev["message"] = [{"type": "at", "data": {"qq": "99999"}},
                          {"type": "text", "data": {"text": " @的是别人"}}]
         ws.send_json(ev)
-        ws.send_json(private_event(text="我是私聊"))
         m = _drain(a)
-    assert m.content == "我是私聊"  # 前一条被忽略，等到的是私聊那条
+    assert m.addressed is False
