@@ -122,8 +122,11 @@ async def test_stream_replays_recent_then_delivers_new():
 async def test_stream_unsubscribes_on_close():
     """生成器被取消/关闭后要退订——否则订阅表随重连一直涨。"""
     s = LogStream()
+    # 先放一帧，让 stream() 一开跑就有回放帧可 yield；否则它要等到 15s 的心跳
+    # 才吐第一帧，这个用例就会白等 15 秒（它只关心订阅表，不关心帧内容）。
+    s.publish({"type": "log", "n": "x"})
     agen = s.stream()
-    await agen.__anext__()  # 让它跑起来、登记订阅
+    await agen.__anext__()  # 回放帧立刻返回，订阅已登记
     assert len(s._subscribers) == 1
     await agen.aclose()
     assert s._subscribers == []
