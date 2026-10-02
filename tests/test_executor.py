@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import pytest
 
+from core.bus.event_bus import EventBus
 from core.executor import ToolCall, ToolExecutor
 from core.plugin.guard import PermissionGuard
 from core.plugin.registry import PluginRegistry
@@ -25,6 +26,14 @@ def registry():
     reg.reset()
     yield reg
     reg.reset()
+
+
+@pytest.fixture(autouse=True)
+def clean_bus():
+    bus = EventBus()
+    bus.reset()
+    yield bus
+    bus.reset()
 
 
 def write_plugin(root, name, *, permissions=None, main_py):
@@ -241,3 +250,37 @@ def test_data_is_json_serializable(registry):
     ex = ToolExecutor(registry)
     result = ex.execute(call("ping"))
     json.dumps(result.data, ensure_ascii=False)
+
+
+# ---------- tool.called 事件（§18.2 目录，生产者=ToolExecutor） ----------
+
+
+def test_publishes_tool_called_on_success(registry, clean_bus):
+    """成功也要发——日志页据此显示"调了哪个工具"。"""
+    registry.scan()
+    ex = ToolExecutor(registry, bus=clean_bus)
+    seen = []
+    clean_bus.subscribe("tool.called", lambda e: seen.append(e.data))
+    ex.execute(call("ping"), session_id="web:abc")
+    assert len(seen) == 1
+    assert seen[0]["tool"] == "ping"
+    assert seen[0]["ok"] is True
+    assert seen[0]["session_id"] == "web:abc"
+
+
+def test_publishes_tool_called_on_failure(registry, clean_bus):
+    """失败更值得看：也发，且带上错误原因。"""
+    registry.scan()
+    ex = ToolExecutor(registry, bus=clean_bus)
+    seen = []
+    clean_bus.subscribe("tool.called", lambda e: seen.append(e.data))
+    ex.execute(call("不存在的工具"), session_id="s")
+    assert seen and seen[0]["ok"] is False
+    assert seen[0]["error"]
+
+
+def test_no_bus_means_no_publish(registry):
+    """不注入 bus（裸构造）就不发事件——单测/CLI 不需要，行为跟以前一样。"""
+    registry.scan()
+    ex = ToolExecutor(registry)  # 无 bus
+    ex.execute(call("ping"))  # 不抛即通过（没法订阅到，只为确认不炸）

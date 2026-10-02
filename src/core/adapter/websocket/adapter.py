@@ -24,11 +24,12 @@ from pathlib import Path
 from typing import Callable
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from core.adapter.base import AdapterBase, Message, Reply
 from core.bus.event_bus import EventBus
+from core.log_stream import LogStream
 
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
@@ -53,6 +54,7 @@ class WebSocketAdapter(AdapterBase):
         port: int = 8000,
         history_provider: Callable[[str], list[dict]] | None = None,
         clearer: Callable[[str], int] | None = None,
+        stream: LogStream | None = None,
     ) -> None:
         super().__init__(bus=bus)
         self.host = host
@@ -64,6 +66,9 @@ class WebSocketAdapter(AdapterBase):
         # 清空历史的回调（session_id → 删掉的条数）。由 main 注入 store.clear。
         # 同样不直接传 store，理由同上；不注入就忽略清空请求。
         self._clearer = clearer
+        # 实时日志流（可选）。注入才挂 /events（SSE）与 /logs（调试页）——
+        # 不注入时行为跟以前完全一样（大量测试构造裸适配器，不能被波及）。
+        self._stream = stream
         # session_id → 连接。同会话重连覆盖旧连接（后连的说了算）
         self._connections: dict[str, WebSocket] = {}
         self.app = self._build_app()
@@ -196,6 +201,29 @@ class WebSocketAdapter(AdapterBase):
                 if self._connections.get(session_id) is websocket:
                     self._connections.pop(session_id, None)
                 logger.info("WebUI 已断开：session=%s", session_id)
+
+        # 实时日志（可选）：SSE 流 + 调试页。没注入 stream 就不挂这两条路由——
+        # 大量测试构造裸适配器，行为必须跟以前一样。
+        if self._stream is not None:
+            stream = self._stream
+
+            @app.get("/events")
+            async def events() -> StreamingResponse:
+                """SSE：把日志与关键事件实时推给页面。
+
+                X-Accel-Buffering: no —— 万一前面挂了 nginx，别让它把流缓冲起来，
+                否则「实时」就变成「攒一堆一次性吐」。没有反代时这个头无害。
+                """
+                return StreamingResponse(
+                    stream.stream(),
+                    media_type="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+                )
+
+            @app.get("/logs")
+            async def logs() -> RedirectResponse:
+                """日志调试页入口，跟 / → index.html 同构。"""
+                return RedirectResponse("/static/logs.html")
 
         # 静态聊天页。挂到 / 下；webui/index.html 就是入口（M0-12）。
         if WEBUI_DIR.is_dir():

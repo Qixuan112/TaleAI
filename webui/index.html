@@ -310,6 +310,55 @@ function addSystemNote(text) {
 var ws = null;
 var pending = null;   // 等待回复时占位的那条气泡
 
+// ---- 分条渲染：模拟真人打字 --------------------------------------------------
+// 一条回复可能分好几条（先应一声、再答正文）。QQ 是在服务端逐条发、条间 sleep
+// （见 src/core/adapter/pacing.py）；WebUI 这边整包一次到达，所以在**渲染时**补上
+// 同样的节奏——第一条立即出现，之后每条等"真人打这么多字"的时间。
+//
+// 公式与 pacing.py 保持一致（那是权威定义，改一处要同步另一处）：
+//   延迟 = 下一条字符数 × 0.22 秒 + 随机抖动，夹在 0.4 ~ 4.0 秒之间
+// 停顿取决于**下一条有多长**——刚说完一句短的、下一句长，就多等一会儿；
+// 随机量让同样字数的两条也不会停出一模一样的间隔。
+var TYPING_PER_CHAR = 0.22;   // 每字 0.22 秒 ≈ 每秒 4.5 字
+var TYPING_JITTER = 0.5;      // 抖动上限（秒）
+var TYPING_MIN = 0.4;
+var TYPING_MAX = 4.0;
+
+function typingDelayMs(text) {
+  var d = (text || "").length * TYPING_PER_CHAR + Math.random() * TYPING_JITTER;
+  return Math.max(TYPING_MIN, Math.min(TYPING_MAX, d)) * 1000;
+}
+
+function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+// 渲染链：连续的回复帧排队渲染——上一条还在停顿、下一条就插进来会乱序
+var renderChain = Promise.resolve();
+function enqueueRender(data) {
+  renderChain = renderChain.then(function () { return renderReply(data); });
+}
+
+async function renderReply(data) {
+  var msgs = data.messages || [];
+  // 回复到了：先把"在想…"占位换成第一条，并立刻恢复输入——
+  // 别让用户等所有气泡都敲完才轮到打字（真人聊天也不会这么等）
+  if (pending) { pending.remove(); pending = null; }
+  if (msgs.length) addBubble(msgs[0], "tale");
+  sendEl.disabled = false;
+  inputEl.focus();
+  // 之后每条按真人打字节奏陆续出现
+  for (var i = 1; i < msgs.length; i++) {
+    await sleep(typingDelayMs(msgs[i]));
+    addBubble(msgs[i], "tale");
+  }
+  if (data.tool_calls_made > 0) addToolNote(data.tool_calls_made);
+  if (data.stop_reason && data.stop_reason !== "ok") {
+    var meta = document.createElement("div");
+    meta.className = "meta";
+    meta.textContent = "（结束原因：" + data.stop_reason + "）";
+    messagesEl.appendChild(meta);
+  }
+}
+
 function connect() {
   var proto = location.protocol === "https:" ? "wss:" : "ws:";
   ws = new WebSocket(proto + "//" + location.host + "/ws?session_id=" + encodeURIComponent(SID));
@@ -354,18 +403,9 @@ function connect() {
       return;
     }
 
-    // 每条 <msg> 单独一个气泡——模型可能分几句说
-    (data.messages || []).forEach(function (m) { addBubble(m, "tale"); });
-    if (data.tool_calls_made > 0) addToolNote(data.tool_calls_made);
-    if (data.stop_reason && data.stop_reason !== "ok") {
-      var meta = document.createElement("div");
-      meta.className = "meta";
-      meta.textContent = "（结束原因：" + data.stop_reason + "）";
-      messagesEl.appendChild(meta);
-    }
-    if (pending) { pending.remove(); pending = null; }
-    sendEl.disabled = false;
-    inputEl.focus();
+    // 每条 <msg> 单独一个气泡，按真人打字节奏逐条出现（见 renderReply）。
+    // 排队渲染：连着来两条回复时不会交叉错序。
+    enqueueRender(data);
   };
 }
 

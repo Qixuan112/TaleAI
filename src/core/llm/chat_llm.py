@@ -20,6 +20,7 @@ from pathlib import Path
 from openai import AsyncOpenAI
 
 from core.adapter.base import Reply
+from core.bus.event_bus import EventBus
 from core.config.loader import Config
 from core.executor import ToolCall, ToolExecutor
 from core.llm.context import ContextAssembler, SessionContext
@@ -102,7 +103,7 @@ def _history_turn_for_model(entry: dict) -> dict:
 class ChatLLM:
     """对话机器人：组装上下文并调用真实 LLM。"""
 
-    def __init__(self) -> None:
+    def __init__(self, bus: EventBus | None = None) -> None:
         # 读配置（服务商 / 模型 / key）
         cfg = Config.load("config")
         secrets = Config.load("secrets")
@@ -135,9 +136,13 @@ class ChatLLM:
         self.client = AsyncOpenAI(base_url=self.base_url, api_key=self.api_key)
         # 上下文装配（M0-03 欠的那半）：动态块由它准备，本类不自己拼（§18.5 硬规则 6）
         self.context = ContextAssembler()
-        # 工具链（M0-05/06/07）：注册表提供工具表，执行器负责跑
+        # 工具链（M0-05/06/07）：注册表提供工具表，执行器负责跑。
+        # bus 透传给执行器——它执行完发 tool.called（§18.2），供日志页订阅。
         self.registry = PluginRegistry()
-        self.executor = ToolExecutor(self.registry)
+        self.executor = ToolExecutor(self.registry, bus=bus)
+        # 当前处理的会话 ID：_tool_message 发 tool.called 时带上，标注谁触发的。
+        # run_loop 每轮进来时刷新（单实例串行处理，不担心并发）。
+        self._current_session_id: str = ""
         # 兜底文案（§19-2：模型什么都没说时发它；写在 prompts 里可改）
         self.fallback_text = _load_fallback_text()
 
@@ -235,7 +240,8 @@ class ChatLLM:
             payload = {"error": f"参数不是合法 JSON：{raw_args}"}
         else:
             result = self.executor.execute(
-                ToolCall(call_id=sdk_call.id, name=sdk_call.function.name, arguments=args)
+                ToolCall(call_id=sdk_call.id, name=sdk_call.function.name, arguments=args),
+                session_id=self._current_session_id,
             )
             # 成功回结果，失败回原因——模型得知道为什么失败才能纠正
             payload = (
@@ -274,6 +280,8 @@ class ChatLLM:
         )
         messages = self.assemble_messages(user_question, history, session=session)
         tools = self.registry.tool_schemas()
+        # 记下本次会话 ID，_tool_message 发 tool.called 时用（旁路事件标注来源）
+        self._current_session_id = session_id
 
         collected: list[str] = []
         tool_calls_made = 0

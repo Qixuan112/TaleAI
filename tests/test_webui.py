@@ -154,3 +154,44 @@ def test_page_clear_is_two_press_confirmed(page):
     assert re.search(r'classList\.add\(\s*"armed"', page), "没有进入待发态"
     assert re.search(r'action\s*:\s*"clear"', page)
 
+
+# ---------- 日志调试页 logs.html（SSE 实时日志） ----------
+
+
+@pytest.fixture
+def logs_page() -> str:
+    path = WEBUI_DIR / "logs.html"
+    assert path.exists(), "webui/logs.html 不存在——SSE 日志页"
+    return path.read_text(encoding="utf-8")
+
+
+def test_logs_page_exists():
+    assert (WEBUI_DIR / "logs.html").is_file()
+
+
+def test_logs_page_served():
+    a = WebSocketAdapter()
+    r = TestClient(a.app).get("/static/logs.html")
+    assert r.status_code == 200
+    assert "text/html" in r.headers["content-type"]
+
+
+def test_logs_page_connects_to_events(logs_page):
+    """日志页连的是 /events（SSE 端点），用原生 EventSource。"""
+    assert "EventSource" in logs_page
+    assert "/events" in logs_page
+
+
+def test_logs_page_makes_no_framework_or_cdn_calls(logs_page):
+    low = logs_page.lower()
+    for m in ("vue", "react", "jquery", "cdn.", "unpkg.com", "jsdelivr"):
+        assert m not in low, f"日志页引了不该有的东西：{m!r}"
+
+
+def test_logs_page_uses_textcontent(logs_page):
+    """跟聊天页同一条 XSS 纪律：内容一律 textContent，不塞 innerHTML。
+
+    （清屏用的 innerHTML="" 是清空，不含变量，不算口子。）
+    """
+    assert "textContent" in logs_page
+
