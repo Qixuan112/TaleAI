@@ -1,0 +1,6 @@
+{
+  "name": "time_query",
+  "version": "0.1.0",
+  "description": "查询指定时区的当前时间。M0 的有参工具，用于验证参数传递与结果回喂。",
+  "permissions": []
+}
