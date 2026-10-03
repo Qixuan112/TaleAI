@@ -457,3 +457,29 @@ def test_image_download_capped(monkeypatch):
         ]))
         m = _drain(a)
     assert len(m.images) == 2
+
+
+# ---------- 启停信号（PR1：QQService 靠它管生命周期）----------
+
+
+def test_serving_false_before_start():
+    a = QQAdapter()
+    assert a.serving() is False
+
+
+def test_stop_requests_uvicorn_shutdown():
+    class FakeServer:
+        def __init__(self):
+            self.started = True
+            self.should_exit = False
+
+    a = QQAdapter()
+    a._server = FakeServer()
+    assert a.serving() is True
+    a.stop()
+    assert a._server.should_exit is True
+
+
+def test_stop_without_server_is_safe():
+    a = QQAdapter()
+    a.stop()  # 不抛即通过

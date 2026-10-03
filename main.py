@@ -310,7 +310,7 @@ def _qq_enabled() -> bool:
 
 
 def _build(bus: EventBus | None = None):
-    """按 §18.1 组装出 (store, router, bot, bus, adapters, stream)。"""
+    """按 §18.1 组装出 (store, router, bot, bus, adapters, stream, qq_service)。"""
     bus = bus if bus is not None else EventBus()
     store = SessionStore().open()  # 第 3 步：SQLite + WAL + 建表
     PluginRegistry().scan()  # 第 4 步：扫内置 + data/plugin 注册工具
@@ -331,13 +331,34 @@ def _build(bus: EventBus | None = None):
     # clearer 同理：网页上「清空本次历史」要能删库，但适配器只认「(session_id)->删了几条」。
     # extra_routes 同理：设置读写要碰 Config，但适配器不该认识它——main 把
     # 「注册 /api/* 的业务路由」这件事当回调递进去（UX-01 的注入缝）。
-    # 设置读写（UX-05）+ 图片上传（UX-07）各造一个注册器，串起来一起挂。
-    from core.config.api import build_settings_routes
+    # QQ（M0-14）：**无条件构造**——构造只是把 FastAPI app 搭好，不联网、不起端口
+    # （token 也在 start() 才读）。启停归 QQService：设置页的开关控制它，
+    # 失败不再是"记一笔就没了"（页面黄色告示条 + 重试）。Router 先认识它：
+    # 不在跑时没有连接、没有消息，注册本身无副作用。
+    from core.adapter.qq.adapter import QQAdapter
+    from core.adapter.qq.service import QQService
+
+    qq_adapter = QQAdapter(bus=bus)
+    registry.register(qq_adapter)
+
+    async def _on_qq_message(message: Message) -> None:
+        # router 在本函数后面才创建——闭包按引用解析，只有真收到 QQ 消息
+        # （那时一切早已就位）才会被调用。
+        await handle_message(
+            message, router=router, store=store, bot=bot, bus=bus,
+        )
+
+    qq_service = QQService(adapter=qq_adapter, on_message=_on_qq_message)
+
+    # 设置读写（UX-05）+ 图片上传（UX-07）+ QQ 开关（QQService）各造一个
+    # 注册器，串起来一起挂。
+    from core.config.api import build_platforms_routes, build_settings_routes
     from core.image_api import build_upload_routes
 
     def _control_plane(app) -> None:
         build_settings_routes()(app)
         build_upload_routes()(app)
+        build_platforms_routes(qq_service)(app)
 
     web_adapter = WebAdapter(
         bus=bus, port=_resolve_ws_port(),
@@ -349,25 +370,16 @@ def _build(bus: EventBus | None = None):
         extra_routes=_control_plane,
     )
     registry.register(web_adapter)
-    adapters = [web_adapter]
-
-    # 第 8 步（续）：QQ（M0-14）。默认关，配置打开才接——Router 自动认识
-    if _qq_enabled():
-        from core.adapter.qq.adapter import QQAdapter
-
-        qq_adapter = QQAdapter(bus=bus)
-        registry.register(qq_adapter)
-        adapters.append(qq_adapter)
-        logger.info("QQ 适配器已启用（反向 WS，等 SnowLuma 连入）")
+    adapters = [web_adapter]  # QQ 不进这个列表——它的启停归 QQService
 
     router = Router(registry)
 
-    return store, router, bot, bus, adapters, stream
+    return store, router, bot, bus, adapters, stream, qq_service
 
 
 async def _serve() -> None:
     """默认跑法：起 WebSocket 服务（WebUI 聊天 + /logs 日志页）。"""
-    store, router, bot, bus, adapters, stream = _build()
+    store, router, bot, bus, adapters, stream, qq_service = _build()
     # 日志镜像：把 root 的每条日志也推到 /logs 页。**单独挂**而不是塞进
     # Logging.init()——init 的契约是「只加一个文件 handler」（test_log.py 钉着），
     # 破了它日志会重复落盘。服务退出时摘掉，保持干净。
@@ -380,6 +392,14 @@ async def _serve() -> None:
     logger.info("塔利已就绪 → 聊天 http://127.0.0.1:%d/ · 日志 http://127.0.0.1:%d/logs",
                 port, port)
     try:
+        # QQ 的启停归 QQService（设置页开关）：按配置决定启动时试不试；
+        # 失败只落"跳闸"态（页面告示 + 重试按钮），绝不拖垮 web。
+        if _qq_enabled():
+            st = await qq_service.start()
+            logger.info("QQ 服务：state=%s %s", st["state"], st["detail"] or "（无详情）")
+        else:
+            logger.info("QQ 未启用（platforms.qq.enabled=false）——可在设置页打开")
+
         # 第 9 步：把适配器挂成常驻任务，然后前台循环等消息。
         # 每个 start() 各自兜异常（_safe_start）——某平台端口被占不该拖垮别的平台。
         wake = load_wake_policy()
@@ -391,6 +411,11 @@ async def _serve() -> None:
         )
     finally:
         root.removeHandler(mirror)
+        # QQ 的关停先于 store：给它机会把在途的 serve 任务收干净。
+        try:
+            await qq_service.stop()
+        except Exception:
+            logger.exception("停止 QQ 服务时出错（不影响退出）")
         store.close()
 
 

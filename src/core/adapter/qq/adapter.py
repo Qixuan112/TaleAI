@@ -39,7 +39,10 @@ _DEDUP_MAX = 1000
 
 
 class QQAdapter(AdapterBase):
-    """QQ 接入（SnowLuma / OneBot 11，反向 WebSocket）。"""
+    """QQ 接入（SnowLuma / OneBot 11，反向 WebSocket）。
+
+    启停之外的运行时管理（设置页开关、状态、重试）归 QQService——见 service.py。
+    """
 
     name = "qq"
 
@@ -48,10 +51,13 @@ class QQAdapter(AdapterBase):
         self.path = path
         # 当前连接。反向 WS 只有一条（SnowLuma 单连接），断了就置 None
         self._link: WebSocket | None = None
+        # 当前 uvicorn 实例（start() 里创建存下；QQService.stop() 靠它置 should_exit）
+        self._server = None
         # 学来的机器人 QQ 号（X-Self-ID）
         self.bot_id: str = ""
         # 握手 token（OneBot access_token 约定）。空 = 不校验（单机自用默认）。
-        self.access_token: str = self._load_access_token()
+        # 构造时留空，start() 里现读——token 改动随下次"开闸"生效，不用重启进程。
+        self.access_token: str = ""
         # 已见过的 message_id（FIFO 淘汰）
         self._seen_ids: OrderedDict[str, None] = OrderedDict()
         self.app = self._build_app()
@@ -62,6 +68,7 @@ class QQAdapter(AdapterBase):
 
         为什么要 token：反向 WS 谁都能连，任意客户端连上就会把 SnowLuma 顶掉，
         拿到 bot 的控制权（PR #10）。配了 token 就要求握手带上——单机自用可留空。
+        在 start() 时调用（不是构造时）：token 改动随下次开闸生效。
         """
         try:
             from core.config.loader import Config
@@ -154,13 +161,31 @@ class QQAdapter(AdapterBase):
             cfg = Config.load("platforms").get("qq", {})
         except Exception:
             cfg = {}
+        # token 在这里现读（不是构造时）：设置页改完 token，下一次"开闸"
+        # （QQService 重新启动）就生效，不用重启整个进程。
+        self.access_token = self._load_access_token()
         host = cfg.get("host", "127.0.0.1")
         port = int(cfg.get("port", 8866))
 
         config = uvicorn.Config(self.app, host=host, port=port, log_level="warning")
+        # 存引用：QQService.stop() 靠它置 should_exit（uvicorn 的优雅退出开关）。
+        self._server = uvicorn.Server(config)
         logger.info("QQ 适配器监听 ws://%s:%d%s（反向 WS，等 SnowLuma 连入）",
                     host, port, self.path)
-        await uvicorn.Server(config).serve()
+        await self._server.serve()
+
+    def serving(self) -> bool:
+        """uvicorn 是否已完成启动并开始监听（QQService 的就绪探测）。"""
+        return bool(self._server is not None and self._server.started)
+
+    def stop(self) -> None:
+        """请求停止：只置 should_exit（uvicorn 的优雅退出信号）。
+
+        等待 serve 任务退出 / 超时兜底都归 QQService——它才是持有任务的人。
+        这里保持"信号灯"的最小职责（同步方法：就是一次赋值）。
+        """
+        if self._server is not None:
+            self._server.should_exit = True
 
     # ---------- FastAPI 应用 ----------
 

@@ -107,6 +107,58 @@
   .result { font-size: 13px; }
   .result.ok { color: var(--ok); }
   .result.bad { color: var(--bad); }
+
+  /* ---- 抽屉分组：标题条常驻，内容向下滑出 / 收起 ---- */
+  .drawer { border: 1px solid var(--line); border-radius: 12px; margin: 0 0 14px; overflow: hidden; }
+  .drawer-head {
+    width: 100%; display: flex; align-items: center; justify-content: space-between;
+    gap: 10px; padding: 12px 16px; border: 0; background: var(--panel);
+    font: inherit; font-size: 13px; font-weight: 600; color: var(--tale); cursor: pointer;
+  }
+  .drawer-head .caret { color: var(--muted); transition: transform .2s; }
+  .drawer.collapsed .caret { transform: rotate(-90deg); }
+  .drawer-body { display: grid; grid-template-rows: 1fr; transition: grid-template-rows .25s ease; }
+  .drawer.collapsed .drawer-body { grid-template-rows: 0fr; }
+  .drawer-inner { overflow: hidden; min-height: 0; }
+  .drawer-pad { padding: 2px 16px 14px; }
+
+  /* ---- QQ 服务：开关 + 状态 ---- */
+  .qq-row { display: flex; align-items: center; gap: 12px; }
+  .qq-row label { margin: 0; }
+  .switch { position: relative; display: inline-block; width: 46px; height: 26px; flex: none; cursor: pointer; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .switch .slider {
+    position: absolute; inset: 0; background: #c9c9c9; border-radius: 26px;
+    transition: background .2s;
+  }
+  .switch .slider::before {
+    content: ""; position: absolute; width: 20px; height: 20px; left: 3px; top: 3px;
+    background: #fff; border-radius: 50%; transition: transform .2s;
+  }
+  .switch input:checked + .slider { background: var(--ok); }
+  .switch input:checked + .slider::before { transform: translateX(20px); }
+  .switch input:disabled + .slider { opacity: .6; }
+  .qq-status { font-size: 13px; color: var(--muted); }
+
+  /* ---- 顶部黄色告示条（QQ 启动失败时显示：#滚动字 + #重试）---- */
+  .banner {
+    display: flex; align-items: center; gap: 10px;
+    margin: 14px 20px 0; padding: 8px 12px;
+    background: #fff6d8; border: 1px solid #e8d48a; border-radius: 10px;
+    overflow: hidden;
+  }
+  .banner[hidden] { display: none; }
+  .ticker-wrap { flex: 1; overflow: hidden; white-space: nowrap; }
+  .ticker {
+    display: inline-block; padding-left: 100%;
+    animation: ticker 14s linear infinite;
+    font-size: 13px; color: #8a6d1a;
+  }
+  @keyframes ticker { to { transform: translateX(-100%); } }
+  .banner button {
+    flex: none; border: 1px solid #d9bd63; background: #fffdf2; color: #8a6d1a;
+    padding: 4px 12px; border-radius: 8px; font: inherit; font-size: 13px; cursor: pointer;
+  }
 </style>
 </head>
 <body>
@@ -122,6 +174,11 @@
     <a href="/logs">日志</a>
   </nav>
 
+  <div class="banner" id="banner" hidden>
+    <span class="ticker-wrap"><span class="ticker" id="bannerText"></span></span>
+    <button id="bannerRetry" type="button">重试</button>
+  </div>
+
   <main id="body">
     <p class="empty" id="placeholder">加载中…</p>
   </main>
@@ -134,6 +191,9 @@
 // 表单**由字段定义驱动**：拉 /api/settings/fields 拿到每个字段的 key/label/type，
 // 据此渲染；拉 /api/settings/values 填初值。加配置项只改后端 config/fields.py，
 // 这个页面自动跟着变——不在这里硬编码任何字段名。
+//
+// 每个分组是一个"抽屉"（可折叠区块：点标题滑出/收起）；"QQ 服务"是本页
+// 第一个手写区块（开关 + 状态 + 失败告示条）——表单之外的**运行控制**住这里。
 
 var bodyEl = document.getElementById("body");
 
@@ -217,6 +277,91 @@ function makeControl(spec, value) {
   return wrap;
 }
 
+function makeDrawer(title) {
+  var sec = el("section", "drawer");
+  var head = el("button", "drawer-head");
+  head.type = "button";
+  head.appendChild(el("span", null, title));
+  head.appendChild(el("span", "caret", "▾"));
+  var body = el("div", "drawer-body");
+  var inner = el("div", "drawer-inner");
+  var pad = el("div", "drawer-pad");
+  inner.appendChild(pad);
+  body.appendChild(inner);
+  sec.appendChild(head);
+  sec.appendChild(body);
+  head.addEventListener("click", function () { sec.classList.toggle("collapsed"); });
+  return { section: sec, pad: pad };
+}
+
+// ---- QQ 服务抽屉（运行控制：开关 + 状态 + 失败告示条）----
+var qqSwitchEl = null;
+var qqStatusEl = null;
+
+function qqStatusText(st) {
+  if (st.state === "running") {
+    return st.connected ? "运行中 · SnowLuma 已连接" : "运行中 · 等待 SnowLuma 连接";
+  }
+  if (st.state === "starting") return "启动中…";
+  if (st.state === "failed") return "启动失败（原因见上方告示条）";
+  return "已停止";
+}
+
+function renderQQ(st) {
+  if (qqSwitchEl) qqSwitchEl.checked = !!st.enabled;
+  if (qqStatusEl) qqStatusEl.textContent = qqStatusText(st);
+  var banner = document.getElementById("banner");
+  var text = document.getElementById("bannerText");
+  if (st.state === "failed") {
+    // 滚动字展示"跳闸"原因；开关本身保持用户意图（不自动弹回）
+    text.textContent = "QQ 服务启动失败：" + (st.detail || "未知原因") + " —— 处理后可点右侧「重试」";
+    banner.hidden = false;
+  } else {
+    banner.hidden = true;
+  }
+}
+
+function loadQQ() {
+  getJSON("/api/platforms/qq").then(renderQQ).catch(function () {});
+}
+
+function postQQ(enabled) {
+  return fetch("/api/platforms/qq", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled: enabled })
+  }).then(function (r) { return r.json(); }).then(renderQQ);
+}
+
+function buildQQDrawer() {
+  var d = makeDrawer("QQ 服务");
+
+  var row = el("div", "field qq-row");
+  row.appendChild(el("label", null, "QQ 适配器"));
+  var sw = document.createElement("label");
+  sw.className = "switch";
+  var cb = document.createElement("input");
+  cb.type = "checkbox";
+  sw.appendChild(cb);
+  sw.appendChild(el("span", "slider"));
+  row.appendChild(sw);
+  qqSwitchEl = cb;
+
+  qqStatusEl = el("span", "qq-status", "加载中…");
+  row.appendChild(qqStatusEl);
+  d.pad.appendChild(row);
+  d.pad.appendChild(el("div", "help",
+    "开 = 启动反向 WS 服务（等 SnowLuma 连入）；关 = 停止。启动失败时页面顶部出告示条，可重试。"));
+  d.pad.appendChild(el("div", "help",
+    "改动 platforms 的 host / port / token 后，关一下再开即生效。"));
+
+  cb.addEventListener("change", function () {
+    cb.disabled = true;
+    postQQ(cb.checked).catch(function () {}).finally(function () { cb.disabled = false; });
+  });
+  return d.section;
+}
+
 function getJSON(url) {
   return fetch(url).then(function (r) { return r.json(); });
 }
@@ -240,15 +385,16 @@ function buildForm(groups) {
       bodyEl.appendChild(el("p", "empty", "域 " + g.d.domain + " 读取失败：" + (g.fields.error || "")));
       return;
     }
-    var fs = document.createElement("fieldset");
-    fs.appendChild(el("legend", null, g.d.title));
+    var d = makeDrawer(g.d.title);
     g.fields.fields.forEach(function (spec) {
       spec.domain = g.d.domain;
       var v = g.values.values ? g.values.values[spec.key] : spec.default;
-      fs.appendChild(makeControl(spec, v));
+      d.pad.appendChild(makeControl(spec, v));
     });
-    bodyEl.appendChild(fs);
+    bodyEl.appendChild(d.section);
   });
+
+  bodyEl.appendChild(buildQQDrawer());
 
   var actions = el("div", "actions");
   var btn = el("button", null, "保存");
@@ -314,7 +460,11 @@ function refreshValues() {
   });
 }
 
-renderAll().then(buildForm).catch(function (e) {
+document.getElementById("bannerRetry").addEventListener("click", function () {
+  postQQ(true).catch(function () {});
+});
+
+renderAll().then(buildForm).then(loadQQ).catch(function (e) {
   bodyEl.textContent = "";
   bodyEl.appendChild(el("p", "empty", "加载设置失败：" + e));
 });
