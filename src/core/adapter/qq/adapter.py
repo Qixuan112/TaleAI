@@ -29,6 +29,7 @@ from core.adapter.base import AdapterBase, Message, Reply
 from core.adapter.pacing import typing_delay
 from core.adapter.qq.protocol import build_send_action, parse_event
 from core.bus.event_bus import EventBus
+from core.image_store import MAX_IMAGES_PER_MESSAGE, download as download_image
 
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
@@ -149,7 +150,7 @@ class QQAdapter(AdapterBase):
             try:
                 while True:
                     raw = await websocket.receive_json()
-                    self._on_frame(raw)
+                    await self._on_frame(raw)
             except WebSocketDisconnect:
                 pass
             except Exception:
@@ -162,7 +163,7 @@ class QQAdapter(AdapterBase):
 
         return app
 
-    def _on_frame(self, raw: dict) -> None:
+    async def _on_frame(self, raw: dict) -> None:
         """处理一帧：消息事件 → 入队；API 响应 → 忽略。"""
         if not isinstance(raw, dict):
             return
@@ -185,8 +186,18 @@ class QQAdapter(AdapterBase):
             while len(self._seen_ids) > _DEDUP_MAX:
                 self._seen_ids.popitem(last=False)
 
-        if not message.content:
-            return  # 纯图片/表情等无文本——M0 模型看不到，跳过
+        # 图片（UX-08）：把 OneBot 给的图片 URL 下载落地成文件名，填进 images。
+        # 下载是阻塞 I/O，用 to_thread 丢给线程池，别卡住事件循环（其它消息
+        # 还在等着收）。失败/超时当无图——网络是外部依赖，不能拖垮链路。
+        urls = (message.meta or {}).get("image_urls") or []
+        if urls:
+            files = await asyncio.to_thread(self._download_images, urls)
+            message.images = files[:MAX_IMAGES_PER_MESSAGE]
+
+        # 纯图片/表情等无文本：**不再丢弃**——图就是内容（UX-08）。
+        # 只有"既无文字又无图"才真的空（理论上不会发生，防御性）。
+        if not message.content and not message.images:
+            return
 
         # "有没有 @ 我"是**平台事实**（得知道 bot_id），只有这里判得了。
         # 但"要不要因此开口"是**唤醒策略**（什么范围生效、什么算叫它），
@@ -203,6 +214,17 @@ class QQAdapter(AdapterBase):
                              message.session_id)
 
         self._deliver(self._strip_bot_mention(message))
+
+    def _download_images(self, urls: list[str]) -> list[str]:
+        """下载一组图片 URL → 文件名列表（失败/非图跳过）。阻塞，由 to_thread 调。"""
+        names: list[str] = []
+        for url in urls:
+            name = download_image(url)
+            if name:
+                names.append(name)
+            if len(names) >= MAX_IMAGES_PER_MESSAGE:
+                break
+        return names
 
     def _mentions_bot(self, message: Message) -> bool:
         """这条群消息有没有 @ 机器人。

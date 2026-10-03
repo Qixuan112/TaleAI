@@ -17,7 +17,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 import pytest
 from fastapi.testclient import TestClient
 
+from core.adapter import qq as qq_pkg
 from core.adapter.base import Reply
+from core.adapter.qq import adapter as qq_adapter_mod
 from core.adapter.qq.adapter import QQAdapter
 from core.bus.event_bus import EventBus
 
@@ -332,3 +334,68 @@ def test_group_at_other_person_marks_not_addressed():
         ws.send_json(ev)
         m = _drain(a)
     assert m.addressed is False
+
+
+# ---------- 图片下载（UX-08）----------
+
+
+def test_image_downloaded_into_images(monkeypatch):
+    """带图消息：URL 被下载 → 文件名进 Message.images。"""
+    monkeypatch.setattr(qq_adapter_mod, "download_image",
+                        lambda url: "fake_" + url.rsplit("/", 1)[-1])
+    a = QQAdapter()
+    with TestClient(a.app).websocket_connect(
+        "/qq", headers={"X-Self-ID": "10001"}
+    ) as ws:
+        ws.send_json(private_event(text=[
+            {"type": "text", "data": {"text": "看图"}},
+            {"type": "image", "data": {"url": "https://x/a.png"}},
+        ]))
+        m = _drain(a)
+    assert m.images == ["fake_a.png"]
+    assert m.content == "看图"
+
+
+def test_pure_image_message_is_delivered(monkeypatch):
+    """纯图片（无文字）不再被丢弃——图就是内容。"""
+    monkeypatch.setattr(qq_adapter_mod, "download_image", lambda url: "img.png")
+    a = QQAdapter()
+    with TestClient(a.app).websocket_connect(
+        "/qq", headers={"X-Self-ID": "10001"}
+    ) as ws:
+        ws.send_json(private_event(text=[
+            {"type": "image", "data": {"url": "https://x/only.png"}},
+        ]))
+        m = _drain(a)
+    assert m.images == ["img.png"]
+    assert m.content == ""
+
+
+def test_image_download_failure_degrades_to_text(monkeypatch):
+    """下载失败（返回 None）→ 当无图，不能卡住链路。"""
+    monkeypatch.setattr(qq_adapter_mod, "download_image", lambda url: None)
+    a = QQAdapter()
+    with TestClient(a.app).websocket_connect(
+        "/qq", headers={"X-Self-ID": "10001"}
+    ) as ws:
+        ws.send_json(private_event(text=[
+            {"type": "text", "data": {"text": "文字还在"}},
+            {"type": "image", "data": {"url": "https://x/broken.png"}},
+        ]))
+        m = _drain(a)
+    assert m.images == []
+    assert m.content == "文字还在"
+
+
+def test_image_download_capped(monkeypatch):
+    monkeypatch.setattr(qq_adapter_mod, "download_image", lambda url: "i.png")
+    monkeypatch.setattr(qq_adapter_mod, "MAX_IMAGES_PER_MESSAGE", 2)
+    a = QQAdapter()
+    with TestClient(a.app).websocket_connect(
+        "/qq", headers={"X-Self-ID": "10001"}
+    ) as ws:
+        ws.send_json(private_event(text=[
+            {"type": "image", "data": {"url": f"https://x/{i}.png"}} for i in range(5)
+        ]))
+        m = _drain(a)
+    assert len(m.images) == 2
