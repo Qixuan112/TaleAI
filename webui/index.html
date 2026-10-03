@@ -309,7 +309,7 @@
   <form id="composer">
     <button id="attach" class="attach" type="button" title="添加图片（也可直接粘贴）">＋</button>
     <input id="file" type="file" accept="image/*" multiple hidden>
-    <textarea id="input" placeholder="跟塔利说点什么…（Enter 发送，Shift+Enter 换行；发 &newtale 重置会话；可直接粘贴图片）" autofocus></textarea>
+    <textarea id="input" placeholder="跟塔利说点什么…" autofocus></textarea>
     <button id="send" type="submit">发送</button>
   </form>
 </div>
@@ -593,6 +593,29 @@ fileEl.addEventListener("change", function () {
   fileEl.value = "";   // 允许再次选同一个文件
 });
 
+// ---- 聊天框命令（& 或 / 开头）------------------------------------------------
+// 内置命令：&newtale 重置会话；&help 显示说明。都**不进模型**、不出气泡。
+// 前缀 & 与 / 都认——& 跟正文不撞，/ 是大家更熟的习惯，两个都放行省得记。
+var RESET_CMD = "&newtale";
+var HELP_CMD = "&help";
+
+// 把一行文字归一成命令名（去掉首尾空白、去掉一个前缀、转小写）。
+// 不是命令（没有 & / 前缀）返回 ""。
+function commandOf(text) {
+  var t = (text || "").trim();
+  if (!t || (t[0] !== "&" && t[0] !== "/")) return "";
+  return t.slice(1).toLowerCase();
+}
+
+function isResetCommand(text) { return commandOf(text) === "newtale"; }
+function isHelpCommand(text) { return commandOf(text) === "help"; }
+
+function showHelp() {
+  addSystemNote("&newtale 或 /newtale —— 重置本次会话（会话号不变）");
+  addSystemNote("&help 或 /help —— 显示本说明");
+  addSystemNote("也可以直接粘贴图片发给我看；Enter 发送，Shift+Enter 换行");
+}
+
 function send() {
   var text = inputEl.value.trim();
   var images = readyImageNames();
@@ -601,6 +624,13 @@ function send() {
     if ((text || pendingImages.length) && pendingImages.some(function (e) { return !e.name; })) {
       addSystemNote("图片还在上传，稍等一下");
     }
+    return;
+  }
+
+  // &help：本地显示命令说明，不发服务端、不出气泡。
+  if (isHelpCommand(text) && !images.length) {
+    inputEl.value = "";
+    showHelp();
     return;
   }
 

@@ -161,7 +161,36 @@ def test_newtale_sends_clear_action_not_content():
 
 
 def test_newtale_mentioned_in_placeholder():
-    """输入框提示里告诉用户有这么个命令——否则没人会发现。"""
+    """提示语不堆命令了（用户嫌长）——只留一句招呼，命令靠 &help 发现。"""
     page = _page("index.html")
     assert "&newtale" in page
-    assert re.search(r"placeholder=[^>]*&newtale", page), "提示语里没提 &newtale"
+    m = re.search(r'placeholder="([^"]*)"', page)
+    assert m, "没有 placeholder"
+    ph = m.group(1)
+    assert "&newtale" not in ph, "提示语不该再堆命令了"
+    assert len(ph) <= 20, f"提示语太长了：{ph!r}"
+
+
+# ---------- &help 命令 ----------
+
+
+def test_help_command_defined_and_listed():
+    page = _page("index.html")
+    assert re.search(r"function\s+isHelpCommand", page), "没有 &help 判定函数"
+    assert re.search(r"function\s+showHelp", page), "没有帮助内容函数"
+    assert "&newtale" in page, "帮助里应提到 &newtale"
+
+
+def test_help_is_local_not_sent_to_server():
+    """&help 是本地命令：不出气泡、不发 WS（在 send 里早返回）。"""
+    page = _page("index.html")
+    # showHelp 用系统提示（居中 pill），不调 addBubble
+    assert re.search(r"function\s+showHelp[^}]*addSystemNote", page, re.S), \
+        "帮助内容应该走 addSystemNote，不出气泡"
+
+
+def test_commands_accept_both_prefixes():
+    """& 和 / 前缀都认——省得用户记是哪个。"""
+    page = _page("index.html")
+    assert "commandOf" in page
+    assert '"&"' in page and '"/"' in page, "应同时认 & 和 / 前缀"
