@@ -1,6 +1,9 @@
 """拼 base.md + chat.md + persona.md，组静态 system 提示词。
 
-设计文档 §12（静态块字节稳定）/ §13–14（人格是用户的域）/ §19-13（改动重启生效）。
+设计文档 §12（静态块字节稳定）/ §13–14（人格是用户的域）。
+§19-13「改动重启生效」**经用户拍板偏离**（PR3 热重载）：每回合现拼，
+改完 `data/config/persona.md` 下一句对话即生效——文件没变时拼出来逐字节
+一致，§12 缓存命中的目的不破（缓存的前提是"内容不变"，不是"读得少"）。
 
 **人格正文为什么有两份 + 为什么默认留空**（这是个补回来的设计）：
 
@@ -22,13 +25,18 @@
 - 判「空」：抹掉 HTML 注释和标题行后没有正经内容，就当没写，退回内置默认
   （见 `_has_real_content`）。想改人设，在标题下面写正文即可。
 
-三分文件都是静态块，启动时拼一次、此后不变，所以 system 提示词字节稳定，
-可命中 provider 端缓存（§12）。base/chat 是框架契约，不给用户改——改了
+三个分文件拼出的 system 提示词，只要文件没变就逐字节稳定——它现在
+每回合重拼（热重载），但"内容不变 → 字节不变"依然成立，provider 端
+缓存照样命中（§12）。base/chat 是框架契约，不给用户改——改了
 `<msg>` 就没法解析了。
 """
 
+import logging
 import re
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
+logger.addHandler(logging.NullHandler())
 
 # base.py 自己所在目录
 BASE_DIR = Path(__file__).resolve().parent
@@ -56,7 +64,7 @@ _USER_PERSONA_SKELETON = """\
 - 留空——或者只留这段注释和下面的小标题——就用内置的「塔利」默认人设。
 - 只要你写了一行正经内容，就整份按你写的来，内置默认不再掺和。
 
-改完重启生效（§19-13）。
+改完下一句对话就生效，不用重启。
 -->
 
 ## 我是谁
@@ -100,8 +108,8 @@ def ensure_user_persona(path: Path | str | None = None) -> bool:
 class Persona:
     """拼 base.md + chat.md + 人格正文，组静态 system 提示词。
 
-    三分文件都是静态块，启动时拼一次、此后不变，
-    因此 system 提示词内容字节稳定，可支持 provider 端缓存（方案 A）。
+    build_system_prompt 每次现拼（热重载，PR3）——但"内容不变 → 字节不变"，
+    所以每次请求发出去的 system 前缀完全一致，provider 端缓存照样命中。
     """
 
     def __init__(self, persona_path: Path | str | None = None) -> None:
@@ -111,15 +119,16 @@ class Persona:
         # 人格正文双轨：用户那份写了内容就优先，否则退回内置默认
         self.builtin_persona_path = BUILTIN_PERSONA_PATH
         self.user_persona_path = Path(persona_path) if persona_path is not None else USER_PERSONA_PATH
-        # 方案 A：创建实例时拼一次并缓存
-        self.system_prompt = self._build()
+        # 上次成功拼出的提示词：热重载时读文件失败就回退到它（一个坏文件
+        # 不该让每回合都炸）。这里首发拼一次——文件缺失要启动即暴露，不拖到第一句。
+        self._last_good = self._build()
 
     def _persona_source(self) -> Path:
         """选人格正文的来源：用户写了内容就用用户的，否则用内置默认。
 
         判据是「有没有正经内容」，不是「文件在不在」——用户文件通常存在
         （启动时落的空白骨架），但没写东西时应当仍走内置默认。
-        每次构造时判断一次（不是每轮请求），符合 §19-13「改动重启生效」。
+        每次现拼时判断一次（热重载）：写完内容下一句对话即生效。
         """
         if self.user_persona_path.is_file():
             try:
@@ -131,7 +140,7 @@ class Persona:
         return self.builtin_persona_path
 
     def _build(self) -> str:
-        """现拼一次：读三个文件 + 拼接（私有方法，只被 __init__ 调用）。"""
+        """现拼一次：读三个文件 + 拼接。读不到就抛（由调用方兜底）。"""
         return (
             self.base_path.read_text(encoding="utf-8") + "\n\n"
             + self.chat_path.read_text(encoding="utf-8") + "\n\n"
@@ -139,5 +148,17 @@ class Persona:
         )
 
     def build_system_prompt(self) -> str:
-        """返回缓存的 system 提示词（不再重新读文件）。"""
-        return self.system_prompt
+        """返回 system 提示词——**每次现拼**（热重载，PR3）。
+
+        对模块 docstring 所述 §19-13 的偏离（用户拍板）：
+        - 文件没改 → 拼出来与上次逐字节一致，§12 的 provider 缓存照样命中；
+        - 文件改了（如 persona.md）→ 下一句对话即生效；
+        - 读失败（被删/写坏/坏字节）→ 沿用上次成功那份，不炸回合。
+        """
+        try:
+            prompt = self._build()
+        except (OSError, UnicodeError):
+            logger.warning("读人格文件失败，沿用上一次的提示词", exc_info=True)
+            return self._last_good
+        self._last_good = prompt
+        return prompt
