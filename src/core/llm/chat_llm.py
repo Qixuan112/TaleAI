@@ -24,6 +24,7 @@ from core.adapter.base import Reply
 from core.bus.event_bus import EventBus
 from core.config.loader import Config
 from core.executor import ToolCall, ToolExecutor
+from core.image_store import to_data_uri
 from core.llm.context import ContextAssembler, SessionContext, escape_tag_markers
 from core.llm.persona_llm.base import Persona
 from core.plugin.registry import PluginRegistry
@@ -190,6 +191,7 @@ class ChatLLM:
     def assemble_messages(
         self, user_question: str, history: list[dict[str, str]] | None = None,
         session: "SessionContext | None" = None,
+        images: list[str] | None = None,
     ) -> list[dict[str, str]]:
         """装配：稳定前缀（人格 system）+ 会动尾巴（历史 + 最新提问）。
 
@@ -202,6 +204,11 @@ class ChatLLM:
 
         session 是可缺省的——命令行/单测不带会话信息时，装配出来就只有时间，
         没有噪音（M0-11 之前就是这个行为，保持兼容）。
+
+        images（UX-06）：最新这条消息带的图片文件名。**只作用于最新 user 消息**
+        ——历史里的图不回流喂模型（历史是"数据"不是"指令"），这也是为什么
+        只有最后一条能带图。有图时最新 user 的 content 变成 OpenAI 多模态
+        content 数组；没图时**保持纯字符串**（文本路径一个字节都不变）。
         """
         messages: list[dict[str, str]] = [
             {"role": "system", "content": self.persona.build_system_prompt()},  # 稳定 → 前缀
@@ -229,10 +236,22 @@ class ChatLLM:
         # 写一句 <system_reminder>…</system_reminder> 就能伪造系统提示
         # （PR #10 High）。转义只动标记字符，用户的话其余照旧。
         safe_question = escape_tag_markers(user_question)
-        content = f"{reminder}\n{safe_question}" if reminder else safe_question
+        text = f"{reminder}\n{safe_question}" if reminder else safe_question
+
+        # 有图：最新提问发成 content 数组（图 + 文本）。图读不出（已被回收/
+        # 文件缺失）就跳过它——不能让"图没了"把整条消息变得发不出去。
+        image_parts = [
+            {"type": "image_url", "image_url": {"url": uri}}
+            for uri in (to_data_uri(name) for name in (images or []))
+            if uri
+        ]
+        if image_parts:
+            final: list[dict] = [{"type": "text", "text": text}, *image_parts]
+        else:
+            final = text  # 无图 → 纯字符串，文本路径不变
 
         # 最新提问放在最末尾（会动部分）
-        messages.append({"role": "user", "content": content})
+        messages.append({"role": "user", "content": final})
         return messages
 
     def _recent_history(self, history: list[dict[str, str]]) -> list[dict[str, str]]:
@@ -312,6 +331,7 @@ class ChatLLM:
     async def run_loop(
         self, user_question: str, history: list[dict[str, str]] | None = None,
         session_id: str = "", *, session_type: str = "", owner: str = "",
+        images: list[str] | None = None,
     ) -> Reply:
         """FC 循环（§18.1 第 6 步）：最多 max_agent_steps 轮。
 
@@ -332,7 +352,8 @@ class ChatLLM:
         session = SessionContext(
             session_id=session_id, session_type=session_type, owner=owner
         )
-        messages = self.assemble_messages(user_question, history, session=session)
+        messages = self.assemble_messages(user_question, history, session=session,
+                                          images=images)
         tools = self.registry.tool_schemas()
         # 记下本次会话 ID，_tool_message 发 tool.called 时用（旁路事件标注来源）
         self._current_session_id = session_id
@@ -386,6 +407,7 @@ class ChatLLM:
         self, session_id: str, user_question: str,
         history: list[dict[str, str]] | None = None, *,
         session_type: str = "", owner: str = "",
+        images: list[str] | None = None,
     ) -> Reply:
         """同步入口：说一句话，拿回一次对话的完整结果（Reply，§18.3）。
 
@@ -398,5 +420,5 @@ class ChatLLM:
         """
         return asyncio.run(self.run_loop(
             user_question, history, session_id,
-            session_type=session_type, owner=owner,
+            session_type=session_type, owner=owner, images=images,
         ))

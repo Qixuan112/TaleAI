@@ -57,6 +57,26 @@
   }
   header button:hover { border-color: var(--tale); }
 
+  /* ---- 顶部导航：聊天 / 设置 / 日志（当前页高亮）---- */
+  .nav {
+    display: flex;
+    gap: 2px;
+    padding: 0 16px;
+    border-bottom: 1px solid var(--line);
+    background: var(--panel);
+  }
+  .nav a {
+    padding: 7px 12px;
+    font-size: 12px;
+    color: var(--muted);
+    text-decoration: none;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+    font-family: "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  .nav a:hover { color: var(--ink); }
+  .nav a.active { color: var(--tale); border-bottom-color: var(--tale); font-weight: 600; }
+
   main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
   section { display: flex; flex-direction: column; overflow: hidden; }
   section.events { flex: 0 0 38%; border-bottom: 2px solid var(--line); }
@@ -97,6 +117,12 @@
     <button id="pause" type="button">暂停滚动</button>
     <button id="clear" type="button">清屏</button>
   </header>
+
+  <nav class="nav">
+    <a href="/">聊天</a>
+    <a href="/settings">设置</a>
+    <a class="active" href="/logs">日志</a>
+  </nav>
 
   <main>
     <section class="events">

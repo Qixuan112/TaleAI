@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>塔利 · 设置</title>
+<style>
+  :root {
+    --bg: #f6f5f2;
+    --panel: #ffffff;
+    --ink: #2b2b2b;
+    --muted: #8a8a8a;
+    --tale: #6b7fd7;
+    --tale-soft: #eef0fb;
+    --line: #e6e3dc;
+    --ok: #5fbf7f;
+    --bad: #d9534f;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font: 15px/1.6 "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    display: flex;
+    justify-content: center;
+  }
+  .app {
+    width: 100%;
+    max-width: 760px;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    background: var(--panel);
+    box-shadow: 0 0 40px rgba(0,0,0,.05);
+  }
+  header {
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--line);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  header .spacer { flex: 1; }
+
+  /* ---- 顶部导航：聊天 / 设置 / 日志（当前页高亮）---- */
+  .nav {
+    display: flex;
+    gap: 2px;
+    padding: 0 14px;
+    border-bottom: 1px solid var(--line);
+    background: var(--panel);
+  }
+  .nav a {
+    padding: 8px 12px;
+    font-size: 13px;
+    color: var(--muted);
+    text-decoration: none;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+  }
+  .nav a:hover { color: var(--ink); }
+  .nav a.active { color: var(--tale); border-bottom-color: var(--tale); font-weight: 600; }
+
+  main { flex: 1; overflow-y: auto; padding: 20px; }
+  .empty { color: var(--muted); }
+
+  fieldset {
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 14px 16px;
+    margin: 0 0 18px;
+  }
+  legend { font-size: 13px; font-weight: 600; color: var(--tale); padding: 0 6px; }
+
+  .field { margin: 0 0 14px; }
+  .field:last-child { margin-bottom: 0; }
+  .field label { display: block; font-size: 13px; margin-bottom: 5px; font-weight: 500; }
+  .field .help { font-size: 12px; color: var(--muted); margin-top: 4px; }
+  .field input[type=text],
+  .field input[type=password],
+  .field input[type=number],
+  .field select {
+    width: 100%;
+    padding: 9px 12px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    font: inherit;
+    color: inherit;
+    outline: none;
+    background: #fff;
+  }
+  .field input:focus, .field select:focus { border-color: var(--tale); }
+  .field input[type=checkbox] { width: auto; }
+
+  .actions {
+    display: flex; align-items: center; gap: 12px;
+    padding-top: 4px; position: sticky; bottom: 0;
+    background: var(--panel);
+  }
+  .actions button {
+    border: 0; background: var(--tale); color: #fff;
+    padding: 10px 22px; border-radius: 10px; font: inherit; cursor: pointer;
+  }
+  .actions button:disabled { opacity: .5; cursor: default; }
+  .result { font-size: 13px; }
+  .result.ok { color: var(--ok); }
+  .result.bad { color: var(--bad); }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <h1>塔利 · 设置</h1>
+    <span class="spacer"></span>
+  </header>
+
+  <nav class="nav">
+    <a href="/">聊天</a>
+    <a class="active" href="/settings">设置</a>
+    <a href="/logs">日志</a>
+  </nav>
+
+  <main id="body">
+    <p class="empty" id="placeholder">加载中…</p>
+  </main>
+</div>
+
+<script>
+// 一律用 textContent 写入文本、用 createElement 造节点——不把内容拼进 HTML 字符串
+// （跟 index/logs 同一条 XSS 纪律）。
+//
+// 表单**由字段定义驱动**：拉 /api/settings/fields 拿到每个字段的 key/label/type，
+// 据此渲染；拉 /api/settings/values 填初值。加配置项只改后端 config/fields.py，
+// 这个页面自动跟着变——不在这里硬编码任何字段名。
+
+var bodyEl = document.getElementById("body");
+
+// 要展示的域（本批范围：config 全部 + secrets 的密钥）。
+// 顺序即页面上的分组顺序。
+var DOMAINS = [
+  { domain: "config", title: "模型与行为" },
+  { domain: "secrets", title: "密钥" }
+];
+
+// 每个字段的输入控件记在这里：key → (读值/写值)
+var controls = {};
+
+function el(tag, cls, text) {
+  var e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text != null) e.textContent = text;
+  return e;
+}
+
+function makeControl(spec, value) {
+  var wrap = el("div", "field");
+  var lab = el("label", null, spec.label);
+  wrap.appendChild(lab);
+
+  var input;
+  if (spec.type === "select") {
+    input = document.createElement("select");
+    (spec.choices || []).forEach(function (c) {
+      var opt = document.createElement("option");
+      opt.value = c;
+      opt.textContent = c;
+      input.appendChild(opt);
+    });
+    input.value = value;
+  } else if (spec.type === "bool") {
+    input = document.createElement("input");
+    input.type = "checkbox";
+    input.checked = !!value;
+    input.style.width = "auto";
+  } else if (spec.type === "password") {
+    input = document.createElement("input");
+    input.type = "password";
+    // 密钥不回明文：只提示"已设置/未设置"，留空 = 不改
+    input.placeholder = (value && value.set) ? "已设置（留空则不修改）" : "未设置";
+    input.value = "";
+  } else if (spec.type === "number") {
+    input = document.createElement("input");
+    input.type = "number";
+    input.value = (value == null ? "" : value);
+  } else {
+    input = document.createElement("input");
+    input.type = "text";
+    // list 默认值（wake.words）在面板里是逗号分隔的文本框
+    if (Array.isArray(value)) input.value = value.join(", ");
+    else input.value = (value == null ? "" : value);
+  }
+  wrap.appendChild(input);
+  if (spec.help) wrap.appendChild(el("div", "help", spec.help));
+
+  controls[spec.domain + "|" + spec.key] = {
+    spec: spec,
+    input: input,
+    read: function () {
+      if (spec.type === "bool") return input.checked;
+      if (spec.type === "password") return input.value;   // 空 = 不动
+      return input.value;
+    },
+    // 把当前值写回控件（原地刷新用，不重建 DOM）
+    apply: function (value) {
+      if (spec.type === "bool") { input.checked = !!value; return; }
+      if (spec.type === "password") {
+        input.placeholder = (value && value.set) ? "已设置（留空则不修改）" : "未设置";
+        input.value = "";
+        return;
+      }
+      if (Array.isArray(value)) input.value = value.join(", ");
+      else input.value = (value == null ? "" : value);
+    }
+  };
+  return wrap;
+}
+
+function getJSON(url) {
+  return fetch(url).then(function (r) { return r.json(); });
+}
+
+function renderAll() {
+  var jobs = DOMAINS.map(function (d) {
+    return Promise.all([
+      getJSON("/api/settings/fields?domain=" + encodeURIComponent(d.domain)),
+      getJSON("/api/settings/values?domain=" + encodeURIComponent(d.domain))
+    ]).then(function (res) { return { d: d, fields: res[0], values: res[1] }; });
+  });
+  return Promise.all(jobs);
+}
+
+function buildForm(groups) {
+  bodyEl.textContent = "";   // 清空（清空不算塞内容）
+  controls = {};
+
+  groups.forEach(function (g) {
+    if (!g.fields.ok) {
+      bodyEl.appendChild(el("p", "empty", "域 " + g.d.domain + " 读取失败：" + (g.fields.error || "")));
+      return;
+    }
+    var fs = document.createElement("fieldset");
+    fs.appendChild(el("legend", null, g.d.title));
+    g.fields.fields.forEach(function (spec) {
+      spec.domain = g.d.domain;
+      var v = g.values.values ? g.values.values[spec.key] : spec.default;
+      fs.appendChild(makeControl(spec, v));
+    });
+    bodyEl.appendChild(fs);
+  });
+
+  var actions = el("div", "actions");
+  var btn = el("button", null, "保存");
+  var result = el("span", "result");
+  actions.appendChild(btn);
+  actions.appendChild(result);
+  bodyEl.appendChild(actions);
+
+  btn.addEventListener("click", function () { save(btn, result); });
+}
+
+function save(btn, result) {
+  btn.disabled = true;
+  result.className = "result";
+  result.textContent = "保存中…";
+
+  // 按域分组提交（两个域两次 POST）
+  var byDomain = {};
+  Object.keys(controls).forEach(function (k) {
+    var c = controls[k];
+    var domain = c.spec.domain;
+    (byDomain[domain] = byDomain[domain] || {})[c.spec.key] = c.read();
+  });
+
+  var posts = Object.keys(byDomain).map(function (domain) {
+    return fetch("/api/settings/values", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ domain: domain, values: byDomain[domain] })
+    }).then(function (r) { return r.json().then(function (j) { return { domain: domain, j: j }; }); });
+  });
+
+  Promise.all(posts).then(function (results) {
+    btn.disabled = false;
+    var bad = results.filter(function (r) { return !r.j.ok; });
+    if (bad.length) {
+      result.className = "result bad";
+      result.textContent = "保存失败：" + (bad[0].j.error || "未知错误");
+      return;
+    }
+    result.className = "result ok";
+    result.textContent = "已保存。" + ((results[0].j && results[0].j.note) || "");
+    // 原地刷新值（密钥打码状态、list 归一后的样子），**不重建 DOM**——
+    // 重建会把上面这条 result 元素一起换掉，回执就没了；原地刷新还能保住焦点。
+    refreshValues();
+  }).catch(function (e) {
+    btn.disabled = false;
+    result.className = "result bad";
+    result.textContent = "网络错误：" + e;
+  });
+}
+
+// 重新拉一遍各域的值，写回已有控件（不动页面结构）。
+function refreshValues() {
+  DOMAINS.forEach(function (d) {
+    getJSON("/api/settings/values?domain=" + encodeURIComponent(d.domain)).then(function (res) {
+      if (!res.ok || !res.values) return;
+      Object.keys(res.values).forEach(function (key) {
+        var c = controls[d.domain + "|" + key];
+        if (c) c.apply(res.values[key]);
+      });
+    }).catch(function () {});
+  });
+}
+
+renderAll().then(buildForm).catch(function (e) {
+  bodyEl.textContent = "";
+  bodyEl.appendChild(el("p", "empty", "加载设置失败：" + e));
+});
+</script>
+</body>
+</html>

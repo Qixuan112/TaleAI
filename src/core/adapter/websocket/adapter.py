@@ -30,6 +30,7 @@ from fastapi.staticfiles import StaticFiles
 
 from core.adapter.base import AdapterBase, Message, Reply
 from core.bus.event_bus import EventBus
+from core.image_store import MAX_IMAGES_PER_MESSAGE
 from core.log_stream import LogStream
 
 logger = logging.getLogger(__name__)
@@ -66,6 +67,7 @@ class WebSocketAdapter(AdapterBase):
         history_provider: Callable[[str], list[dict]] | None = None,
         clearer: Callable[[str], int] | None = None,
         stream: LogStream | None = None,
+        extra_routes: Callable[[FastAPI], None] | None = None,
     ) -> None:
         super().__init__(bus=bus)
         self.host = host
@@ -80,6 +82,10 @@ class WebSocketAdapter(AdapterBase):
         # 实时日志流（可选）。注入才挂 /events（SSE）与 /logs（调试页）——
         # 不注入时行为跟以前完全一样（大量测试构造裸适配器，不能被波及）。
         self._stream = stream
+        # 控制面路由注册器（可选）。由 main 注入一个 `(app) -> None`，在里面挂
+        # 设置读写的 /api/* 等业务路由。用回调而不是把 Config 塞进来——同样是
+        # §22 import 单向：适配器只管"接",不认识配置/存储。不注入＝不多挂任何路由。
+        self._extra_routes = extra_routes
         # session_id → 连接。同会话重连覆盖旧连接（后连的说了算）
         self._connections: dict[str, WebSocket] = {}
         self.app = self._build_app()
@@ -89,11 +95,18 @@ class WebSocketAdapter(AdapterBase):
     def normalize(self, raw: dict) -> Message:
         """把 WebUI 发来的 JSON 归一成 Message。
 
-        期望形状：`{"content": "说了什么", "session_id": "web:local"}`。
+        期望形状：`{"content": "说了什么", "session_id": "web:local",
+        "images": ["<文件名>"]}`（images 可省，UX-07）。
         session_id 缺省用默认值；id / ts 服务端生成（客户端不该操心全局唯一性）。
+        images 是上传端点返回的文件名——客户端先 POST /api/upload 拿到名字，
+        再放进消息帧；这里只透传，不校验存在性（喂模型时读不到会自然跳过）。
         """
         content = str(raw.get("content", "")).strip()
+        # session_id 走 _web_session_id 约束到 web: 前缀内（PR #10 鉴权）。
         session_id = self._web_session_id(str(raw.get("session_id") or ""))
+        # images（UX-07）：上传端点返回的文件名，只透传、不校验存在性。
+        raw_images = raw.get("images") or []
+        images = [str(x) for x in raw_images if str(x).strip()] if isinstance(raw_images, list) else []
 
         return Message(
             id=uuid.uuid4().hex,
@@ -106,6 +119,7 @@ class WebSocketAdapter(AdapterBase):
             direction="in",
             role="user",
             content=content,
+            images=images[:MAX_IMAGES_PER_MESSAGE],  # 上限，防滥用（图太多也顶上下文）
             ts=time.time(),
             meta={},
         )
@@ -260,8 +274,10 @@ class WebSocketAdapter(AdapterBase):
                         await self._clear_and_reply(websocket, session_id)
                         continue
                     message = self.normalize(raw)
-                    if not message.content:
-                        continue  # 空消息不发请求（跟 CLI 的空行一致）
+                    # 空消息不发请求（跟 CLI 的空行一致）。但**纯图消息**（只有图、
+                    # 没文字）是合法输入——图就是内容，不能按空丢掉（UX-07）。
+                    if not message.content and not message.images:
+                        continue
                     self._deliver(message)
             except WebSocketDisconnect:
                 pass
@@ -303,7 +319,17 @@ class WebSocketAdapter(AdapterBase):
             async def index() -> RedirectResponse:
                 return RedirectResponse("/static/index.html")
 
+            @app.get("/settings")
+            async def settings() -> RedirectResponse:
+                """设置页入口，跟 / → index.html、/logs → logs.html 同构。"""
+                return RedirectResponse("/static/settings.html")
+
             app.mount("/static", StaticFiles(directory=str(WEBUI_DIR)), name="static")
+
+        # 控制面路由（设置读写等）由 main 用回调注入——适配器不认识 Config（§22）。
+        # 放在最后：/api/* 与 /ws、/static 等不重叠，顺序无碍。
+        if self._extra_routes is not None:
+            self._extra_routes(app)
 
         return app
 

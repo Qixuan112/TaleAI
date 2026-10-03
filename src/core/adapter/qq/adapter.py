@@ -29,6 +29,7 @@ from core.adapter.base import AdapterBase, Message, Reply
 from core.adapter.pacing import typing_delay
 from core.adapter.qq.protocol import build_send_action, parse_event
 from core.bus.event_bus import EventBus
+from core.image_store import MAX_IMAGES_PER_MESSAGE, download as download_image
 
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
@@ -199,7 +200,8 @@ class QQAdapter(AdapterBase):
                         # 单帧坏了只丢这一帧，不拆连接（PR #10）
                         logger.warning("QQ 收到无法解析的帧，已忽略")
                         continue
-                    self._on_frame(raw)
+                    # _on_frame 是 async（UX-08：要 await to_thread 下载图片）
+                    await self._on_frame(raw)
             except WebSocketDisconnect:
                 pass
             except Exception:
@@ -212,7 +214,7 @@ class QQAdapter(AdapterBase):
 
         return app
 
-    def _on_frame(self, raw: dict) -> None:
+    async def _on_frame(self, raw: dict) -> None:
         """处理一帧：消息事件 → 入队；API 响应 → 忽略。"""
         if not isinstance(raw, dict):
             return
@@ -235,19 +237,45 @@ class QQAdapter(AdapterBase):
             while len(self._seen_ids) > _DEDUP_MAX:
                 self._seen_ids.popitem(last=False)
 
-        if not message.content:
-            return  # 纯图片/表情等无文本——M0 模型看不到，跳过
+        # 图片（UX-08）：把 OneBot 给的图片 URL 下载落地成文件名，填进 images。
+        # 下载是阻塞 I/O，用 to_thread 丢给线程池，别卡住事件循环（其它消息
+        # 还在等着收）。失败/超时当无图——网络是外部依赖，不能拖垮链路。
+        urls = (message.meta or {}).get("image_urls") or []
+        if urls:
+            files = await asyncio.to_thread(self._download_images, urls)
+            message.images = files[:MAX_IMAGES_PER_MESSAGE]
 
-        # 群聊过滤：只在被 @ 时响应。
-        #
-        # 为什么必须过滤：OneBot 的反向 WS 是全局的，接上就会收到该账号能看到的
-        # **所有**群消息。在活跃群里逐条回复 = 刷屏 + 烧钱 + 被踢。私聊不需要 @
-        # （1:1 会话，有人在说话就是在跟我说话）。
-        if message.session_type == "group" and not self._mentions_bot(message):
-            logger.debug("群聊未 @ 我，忽略：session=%s", message.session_id)
+        # 纯图片/表情等无文本：**不再丢弃**——图就是内容（UX-08）。
+        # 只有"既无文字又无图"才真的空（理论上不会发生，防御性）。
+        if not message.content and not message.images:
             return
 
+        # "有没有 @ 我"是**平台事实**（得知道 bot_id），只有这里判得了。
+        # 但"要不要因此开口"是**唤醒策略**（什么范围生效、什么算叫它），
+        # 那是跨平台配置、放 handle_message 统管（core/wake.py）。
+        # 所以这里不再自行丢弃未 @ 的群消息，只把结论标进 message.addressed，
+        # 交给前台门——这样"未唤醒但存进历史"才做得到（UX-03）。
+        #
+        # 私聊不设 addressed：1:1 会话本就"在对我说"，由唤醒策略的 scope 决定
+        # 它要不要过门（默认 group 范围下根本不过门）。
+        if message.session_type == "group":
+            message.addressed = self._mentions_bot(message)
+            if not message.addressed:
+                logger.debug("群聊未 @ 我：session=%s（交给前台按唤醒策略处理）",
+                             message.session_id)
+
         self._deliver(self._strip_bot_mention(message))
+
+    def _download_images(self, urls: list[str]) -> list[str]:
+        """下载一组图片 URL → 文件名列表（失败/非图跳过）。阻塞，由 to_thread 调。"""
+        names: list[str] = []
+        for url in urls:
+            name = download_image(url)
+            if name:
+                names.append(name)
+            if len(names) >= MAX_IMAGES_PER_MESSAGE:
+                break
+        return names
 
     def _mentions_bot(self, message: Message) -> bool:
         """这条群消息有没有 @ 机器人。

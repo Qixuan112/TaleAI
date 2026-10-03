@@ -81,6 +81,15 @@ _CONFIG_FIELDS = (
         key="bot.name", label="角色名", type="text", default="塔利",
         help="人格自称。改这里只改配置；人格正文的人格名在 persona.md",
     ),
+    FieldSpec(
+        key="wake.words", label="唤醒词", type="text", default=["塔利"],
+        help="多个用逗号分隔。群聊里正文含任一唤醒词（或 @ 塔利）才算在叫它",
+    ),
+    FieldSpec(
+        key="wake.scope", label="唤醒范围", type="select", default="group",
+        choices=("group", "all", "off"),
+        help="group=仅群聊（私聊/网页直接回）；all=所有会话都要唤醒词；off=关闭",
+    ),
 )
 
 _PERSONA_FIELDS = (
