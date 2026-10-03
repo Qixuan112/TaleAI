@@ -250,6 +250,28 @@ class SessionStore:
 
         return [{"role": r["role"], "content": r["content"]} for r in rows]
 
+    def history_with_attachments(self, session_id: str) -> list[dict]:
+        """给 WebUI 历史帧用：[{role, content, images}]，images 是文件名列表。
+
+        跟 history() 分开的原因：history() 是喂模型/给记忆的**文本契约**
+        （被多处测试钉着，不含附件）；网页回放需要知道每条带没带图。
+        两者别合并——模型不该因为界面上有图就改变喂进去的历史形状。
+        """
+        rows = self._db.execute(
+            "SELECT role, content, attachments FROM messages WHERE session_id = ? ORDER BY seq",
+            (session_id,),
+        ).fetchall()
+        out = []
+        for r in rows:
+            imgs = []
+            if r["attachments"]:
+                try:
+                    imgs = json.loads(r["attachments"])
+                except (json.JSONDecodeError, TypeError):
+                    imgs = []
+            out.append({"role": r["role"], "content": r["content"], "images": imgs})
+        return out
+
     def messages(self, session_id: str, limit: int | None = None) -> list[dict]:
         """读回带元信息的完整行（排障用：看得到 tool_json / mentions / ts）。"""
         sql = "SELECT * FROM messages WHERE session_id = ? ORDER BY seq"

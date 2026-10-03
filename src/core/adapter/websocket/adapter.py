@@ -29,6 +29,7 @@ from fastapi.staticfiles import StaticFiles
 
 from core.adapter.base import AdapterBase, Message, Reply
 from core.bus.event_bus import EventBus
+from core.image_store import MAX_IMAGES_PER_MESSAGE
 from core.log_stream import LogStream
 
 logger = logging.getLogger(__name__)
@@ -83,11 +84,16 @@ class WebSocketAdapter(AdapterBase):
     def normalize(self, raw: dict) -> Message:
         """把 WebUI 发来的 JSON 归一成 Message。
 
-        期望形状：`{"content": "说了什么", "session_id": "web:local"}`。
+        期望形状：`{"content": "说了什么", "session_id": "web:local",
+        "images": ["<文件名>"]}`（images 可省，UX-07）。
         session_id 缺省用默认值；id / ts 服务端生成（客户端不该操心全局唯一性）。
+        images 是上传端点返回的文件名——客户端先 POST /api/upload 拿到名字，
+        再放进消息帧；这里只透传，不校验存在性（喂模型时读不到会自然跳过）。
         """
         content = str(raw.get("content", "")).strip()
         session_id = str(raw.get("session_id") or DEFAULT_SESSION_ID)
+        raw_images = raw.get("images") or []
+        images = [str(x) for x in raw_images if str(x).strip()] if isinstance(raw_images, list) else []
 
         return Message(
             id=uuid.uuid4().hex,
@@ -98,6 +104,7 @@ class WebSocketAdapter(AdapterBase):
             direction="in",
             role="user",
             content=content,
+            images=images[:MAX_IMAGES_PER_MESSAGE],  # 上限，防滥用（图太多也顶上下文）
             ts=time.time(),
             meta={},
         )

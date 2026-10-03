@@ -301,7 +301,10 @@ def _build(bus: EventBus | None = None):
         build_upload_routes()(app)
 
     ws_adapter = WebSocketAdapter(
-        bus=bus, port=_resolve_ws_port(), history_provider=store.history,
+        bus=bus, port=_resolve_ws_port(),
+        # 历史帧用带附件的版本：网页回放要显示图（UX-07）。文本契约 history()
+        # 不变——那是喂模型的，两者别混。
+        history_provider=store.history_with_attachments,
         clearer=store.clear, stream=stream,
         extra_routes=_control_plane,
     )
