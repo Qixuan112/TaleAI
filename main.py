@@ -279,13 +279,19 @@ def _resolve_ws_port() -> int:
 
     为什么环境变量优先：联调/冒烟时常常要换个端口避开占用（8000 是很抢手的
     端口，本机就撞过一次），命令行能覆盖就不必改配置文件。
+
+    两个环境变量：TALEAI_PORT（本项目自己的开关，启动.bat 用它、默认 8321）
+    优先；PORT 次之——通用的端口注入约定，工具/托管用它分配动态端口
+    （如预览器的 autoPort），我们跟一手。
     """
-    env = os.environ.get("TALEAI_PORT")
-    if env:
+    for var in ("TALEAI_PORT", "PORT"):
+        env = os.environ.get(var)
+        if not env:
+            continue
         try:
             return int(env)
         except ValueError:
-            logger.warning("TALEAI_PORT 不是数字：%r，改用配置值", env)
+            logger.warning("%s 不是数字：%r，改用配置值", var, env)
     from core.config.loader import Config
 
     try:
