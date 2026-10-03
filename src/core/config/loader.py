@@ -34,15 +34,43 @@ DEFAULT_SOURCES = {
     # §14 定的取值是 text / markdown（"format 预留(text/markdown)"），
     # 与 fields.py 的选项保持一致——两处写不同的值面板会对不上。
     "persona": {"format": "markdown", "version": "v1"},
-    # 平台开关。默认：WebUI 开、QQ 关（QQ 要另跑 SnowLuma 后端，
+    # 平台开关。默认：Web 开、QQ 关（QQ 要另跑 SnowLuma 后端，
     # 没配的人不该多起一个端口）。键名与 fields.py 的 platforms 域一致。
+    # 注：旧版键叫 "websocket"，_migrate_platform_keys 会把旧键并到 "web"。
     "platforms": {
-        "websocket": {"enabled": True, "port": 8000},
+        "web": {"enabled": True, "port": 8000},
         "qq": {"enabled": False, "host": "127.0.0.1", "port": 8866, "access_token": ""},
     },
     "plugins": {},
     "secrets": {},
 }
+
+
+def _migrate_platform_keys(user_data: dict) -> dict:
+    """把旧配置里的 `websocket` 平台键并到新键 `web`（rename 之后的一次性兼容）。
+
+    为什么需要：`adapter/websocket → web` 重命名把平台标识与配置键一起改了。
+    老用户 `platforms.json` 里是 `websocket`——不迁移的话，`_deep_merge` 会让
+    新键 `web` 取默认值（端口回 8000），而用户改过的值躺在孤儿旧键里被忽略。
+    这里把旧键的值**并入**新键（新键已有的字段优先，不覆盖用户显式设过的）。
+
+    只在 platforms 域、且确实含旧键时动作；纯函数，不改入参。
+    """
+    if not isinstance(user_data, dict):
+        return user_data
+    ws = user_data.get("websocket")
+    if not isinstance(ws, dict):
+        return user_data
+    out = copy.deepcopy(user_data)
+    out.pop("websocket", None)
+    web = out.get("web")
+    # 新键不存在 → 直接用旧键的值；存在 → 旧键补齐新键缺的字段（新键优先）
+    if not isinstance(web, dict):
+        out["web"] = ws
+    else:
+        for k, v in ws.items():
+            web.setdefault(k, v)
+    return out
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
@@ -94,6 +122,10 @@ class Config:
 
         with open(file_path, "r", encoding="utf-8") as f:
             user_data = json.load(f)
+
+        # 旧键迁移：老配置里平台键叫 "websocket"，现在统一成 "web"。
+        # 不迁移的话，用户改过的端口会被静默重置回默认（旧键成孤儿、新键取默认）。
+        user_data = _migrate_platform_keys(user_data)
 
         merged = _deep_merge(default, user_data)
         return cls(domain=domain, data=merged, path=file_path)

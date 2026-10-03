@@ -2,7 +2,7 @@
 
 **反向 WS**：SnowLuma 作为客户端主动连**我们**的 `/qq` 端点（它在
 `wsClients` 里配置我们的地址）。所以这里要起一个 WS 服务端——跟
-WebSocketAdapter 同一套 FastAPI app 也可以是独立的，M0 先独立成自己的
+WebAdapter 同一套 FastAPI app 也可以是独立的，M0 先独立成自己的
 app，main 里按需挂载。
 
 握手带两个头（OneBot 11 规范要求读）：

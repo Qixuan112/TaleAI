@@ -14,7 +14,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
-from core.adapter.websocket.adapter import WEBUI_DIR, WebSocketAdapter
+from core.adapter.web.adapter import WEBUI_DIR, WebAdapter
 from core.bus.event_bus import EventBus
 
 
@@ -32,14 +32,14 @@ def test_settings_page_exists():
 
 
 def test_settings_redirects_to_the_page():
-    a = WebSocketAdapter()
+    a = WebAdapter()
     r = TestClient(a.app, follow_redirects=False).get("/settings")
     assert r.status_code in (307, 308)
     assert "settings.html" in r.headers["location"]
 
 
 def test_settings_page_served():
-    a = WebSocketAdapter()
+    a = WebAdapter()
     r = TestClient(a.app).get("/static/settings.html")
     assert r.status_code == 200
     assert "text/html" in r.headers["content-type"]
@@ -102,7 +102,7 @@ def test_extra_routes_injected_and_mounted():
         async def ping() -> JSONResponse:  # noqa: D401
             return JSONResponse({"pong": True})
 
-    a = WebSocketAdapter(extra_routes=control)
+    a = WebAdapter(extra_routes=control)
     r = TestClient(a.app).get("/api/ping")
     assert r.status_code == 200
     assert r.json() == {"pong": True}
@@ -110,7 +110,7 @@ def test_extra_routes_injected_and_mounted():
 
 def test_no_extra_routes_means_no_control_route():
     """不注入就不多挂任何路由——裸适配器的行为跟以前完全一样。"""
-    a = WebSocketAdapter()
+    a = WebAdapter()
     paths = {getattr(r, "path", None) for r in a.app.routes}
     assert "/api/ping" not in paths
 
@@ -124,7 +124,7 @@ def test_extra_routes_do_not_break_ws():
         async def x() -> JSONResponse:
             return JSONResponse({})
 
-    a = WebSocketAdapter(extra_routes=control)
+    a = WebAdapter(extra_routes=control)
     with TestClient(a.app).websocket_connect("/ws?session_id=x") as ws:
         ws.send_json({"content": "还在吗"})
         got = asyncio.run(asyncio.wait_for(a.recv(), timeout=1))

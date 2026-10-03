@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 import pytest
 from fastapi.testclient import TestClient
 
-from core.adapter.websocket.adapter import WebSocketAdapter
+from core.adapter.web.adapter import WebAdapter
 from core.config import api as cfg_api
 from core.config.api import _coerce, _get_dotted, _set_dotted
 
@@ -71,7 +71,7 @@ def test_coerce_text_passthrough():
 @pytest.fixture
 def client(tmp_path):
     """把设置路由挂在一个裸适配器上，config_dir 指向 tmp。"""
-    a = WebSocketAdapter(extra_routes=cfg_api.build_settings_routes(config_dir=tmp_path))
+    a = WebAdapter(extra_routes=cfg_api.build_settings_routes(config_dir=tmp_path))
     return TestClient(a.app)
 
 
@@ -149,7 +149,7 @@ def test_save_persists_to_disk(client, tmp_path):
 
 def test_settings_routes_absent_without_injection():
     """不注入 extra_routes 就不挂设置路由——裸适配器行为不变。"""
-    a = WebSocketAdapter()
+    a = WebAdapter()
     paths = {getattr(r, "path", None) for r in a.app.routes}
     assert "/api/settings/fields" not in paths
 

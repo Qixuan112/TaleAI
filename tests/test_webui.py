@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 import pytest
 from fastapi.testclient import TestClient
 
-from core.adapter.websocket.adapter import WEBUI_DIR, WebSocketAdapter
+from core.adapter.web.adapter import WEBUI_DIR, WebAdapter
 from core.bus.event_bus import EventBus
 
 
@@ -45,7 +45,7 @@ def test_index_html_exists():
 
 
 def test_root_redirects_to_the_page():
-    a = WebSocketAdapter()
+    a = WebAdapter()
     client = TestClient(a.app, follow_redirects=False)
     r = client.get("/")
     assert r.status_code in (307, 308)
@@ -53,7 +53,7 @@ def test_root_redirects_to_the_page():
 
 
 def test_page_is_served():
-    a = WebSocketAdapter()
+    a = WebAdapter()
     r = TestClient(a.app).get("/static/index.html")
     assert r.status_code == 200
     assert "text/html" in r.headers["content-type"]
@@ -63,7 +63,7 @@ def test_page_serving_does_not_break_ws():
     """加了静态页之后 /ws 仍要能用——两条路互不干扰。"""
     import asyncio
 
-    a = WebSocketAdapter()
+    a = WebAdapter()
     with TestClient(a.app).websocket_connect("/ws?session_id=x") as ws:
         ws.send_json({"content": "还在吗"})
         got = asyncio.run(asyncio.wait_for(a.recv(), timeout=1))
@@ -184,7 +184,7 @@ def test_logs_page_exists():
 
 
 def test_logs_page_served():
-    a = WebSocketAdapter()
+    a = WebAdapter()
     r = TestClient(a.app).get("/static/logs.html")
     assert r.status_code == 200
     assert "text/html" in r.headers["content-type"]

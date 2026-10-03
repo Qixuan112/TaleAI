@@ -2,7 +2,7 @@
 
 - /api/upload：收图落盘、回文件名；拒空/拒超大/拒非图
 - /api/img/{name}：取回图片
-- WebSocketAdapter.normalize：消息帧里的 images 透传 + 上限
+- WebAdapter.normalize：消息帧里的 images 透传 + 上限
 - index.html：有附件入口、粘贴、缩略图、历史带图渲染的钩子
 """
 
@@ -16,7 +16,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from core import image_store
-from core.adapter.websocket.adapter import WEBUI_DIR, WebSocketAdapter
+from core.adapter.web.adapter import WEBUI_DIR, WebAdapter
 from core.image_api import build_upload_routes
 
 PNG_1PX = base64.b64decode(
@@ -27,7 +27,7 @@ PNG_1PX = base64.b64decode(
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     monkeypatch.setattr(image_store, "DEFAULT_DIR", tmp_path / "img")
-    a = WebSocketAdapter(extra_routes=build_upload_routes())
+    a = WebAdapter(extra_routes=build_upload_routes())
     return TestClient(a.app)
 
 
@@ -85,20 +85,20 @@ def test_img_path_traversal_blocked(client):
 
 
 def test_ws_normalize_passes_images():
-    a = WebSocketAdapter()
+    a = WebAdapter()
     m = a.normalize({"content": "看图", "session_id": "web:x", "images": ["a.png", "b.png"]})
     assert m.images == ["a.png", "b.png"]
 
 
 def test_ws_normalize_caps_image_count():
-    a = WebSocketAdapter()
+    a = WebAdapter()
     many = [f"{i}.png" for i in range(10)]
     m = a.normalize({"content": "x", "images": many})
     assert len(m.images) == image_store.MAX_IMAGES_PER_MESSAGE
 
 
 def test_ws_normalize_ignores_bad_images_field():
-    a = WebSocketAdapter()
+    a = WebAdapter()
     assert a.normalize({"content": "x", "images": "notalist"}).images == []
     assert a.normalize({"content": "x"}).images == []
 

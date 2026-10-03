@@ -89,3 +89,50 @@ def test_config_save_and_reload(tmp_path):
     # 重新加载应读到改成后的内容
     cfg2 = Config.load("config", path=path)
     assert cfg2.get("bot", {}).get("name") == "改名"
+
+
+# ---------- 平台键迁移：websocket → web（adapter 重命名）----------
+
+
+def test_migrate_platform_keys_renames_old_key():
+    """旧配置的 `websocket` 键并到新键 `web`（否则用户改过的端口被静默重置）。"""
+    from core.config.loader import _migrate_platform_keys
+    out = _migrate_platform_keys({"websocket": {"enabled": True, "port": 9100}})
+    assert "websocket" not in out
+    assert out["web"] == {"enabled": True, "port": 9100}
+
+
+def test_migrate_platform_keys_new_key_wins():
+    """新旧键都在时，新键已有字段优先（用户显式设过的不被旧键盖掉）。"""
+    from core.config.loader import _migrate_platform_keys
+    out = _migrate_platform_keys({
+        "websocket": {"enabled": True, "port": 9100},
+        "web": {"port": 9200},
+    })
+    assert out["web"]["port"] == 9200        # 新键优先
+    assert out["web"]["enabled"] is True     # 旧键补新键缺的字段
+    assert "websocket" not in out
+
+
+def test_migrate_platform_keys_noop_without_old_key():
+    from core.config.loader import _migrate_platform_keys
+    out = _migrate_platform_keys({"web": {"port": 8000}, "qq": {}})
+    assert out == {"web": {"port": 8000}, "qq": {}}
+
+
+def test_migrate_platform_keys_does_not_mutate_input():
+    from core.config.loader import _migrate_platform_keys
+    src = {"websocket": {"port": 9100}}
+    _migrate_platform_keys(src)
+    assert src == {"websocket": {"port": 9100}}   # 入参不动
+
+
+def test_old_platforms_file_loads_with_port_preserved(tmp_path):
+    """端到端：旧格式 platforms.json（含 websocket 键）加载后，端口没丢。"""
+    import json
+    from core.config.loader import Config
+    f = tmp_path / "platforms.json"
+    f.write_text(json.dumps({"websocket": {"enabled": True, "port": 9999}}),
+                 encoding="utf-8")
+    cfg = Config.load("platforms", f)
+    assert cfg.get("web", {}).get("port") == 9999   # 用户改过的端口保住了

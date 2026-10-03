@@ -1,4 +1,4 @@
-"""M0-11 验收：WebSocketAdapter 的收发与归一（§21「WS 收发 + 统一消息模型」）。
+"""M0-11 验收：WebAdapter 的收发与归一（§21「WS 收发 + 统一消息模型」）。
 
 分两半：
 - **收**用 FastAPI 的 TestClient 驱动真实 WS 端点（不绑真实端口）；
@@ -17,7 +17,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from core.adapter.base import Reply
-from core.adapter.websocket.adapter import DEFAULT_SESSION_ID, WebSocketAdapter
+from core.adapter.web.adapter import DEFAULT_SESSION_ID, WebAdapter
 from core.bus.event_bus import EventBus
 
 
@@ -42,7 +42,7 @@ class FakeSocket:
         self.sent.append(payload)
 
 
-def _drain_inbox(adapter: WebSocketAdapter):
+def _drain_inbox(adapter: WebAdapter):
     """同步取一条（在 TestClient 上下文内调用，消息已投递）。"""
     return asyncio.run(asyncio.wait_for(adapter.recv(), timeout=1))
 
@@ -51,9 +51,9 @@ def _drain_inbox(adapter: WebSocketAdapter):
 
 
 def test_normalize_basic():
-    a = WebSocketAdapter()
+    a = WebAdapter()
     m = a.normalize({"content": "你好", "session_id": "web:local"})
-    assert m.platform == "websocket"
+    assert m.platform == "web"
     assert m.session_id == "web:local"
     assert m.role == "user"
     assert m.direction == "in"
@@ -62,7 +62,7 @@ def test_normalize_basic():
 
 def test_normalize_generates_unique_ids():
     """id 由服务端生成：客户端不该操心全局唯一性，两条消息不能撞 id。"""
-    a = WebSocketAdapter()
+    a = WebAdapter()
     m1 = a.normalize({"content": "a"})
     m2 = a.normalize({"content": "b"})
     assert m1.id and m2.id and m1.id != m2.id
@@ -70,12 +70,12 @@ def test_normalize_generates_unique_ids():
 
 def test_normalize_defaults_session_id():
     """裸连（没带 session_id）也要能用——落到默认会话。"""
-    a = WebSocketAdapter()
+    a = WebAdapter()
     assert a.normalize({"content": "x"}).session_id == DEFAULT_SESSION_ID
 
 
 def test_normalize_strips_content():
-    a = WebSocketAdapter()
+    a = WebAdapter()
     assert a.normalize({"content": "  有空格  "}).content == "有空格"
 
 
@@ -83,18 +83,18 @@ def test_normalize_strips_content():
 
 
 def test_incoming_ws_message_lands_in_inbox():
-    a = WebSocketAdapter()
+    a = WebAdapter()
     with TestClient(a.app).websocket_connect("/ws?session_id=web:local") as ws:
         ws.send_json({"content": "在吗"})
         msg = _drain_inbox(a)
     assert msg.content == "在吗"
     assert msg.session_id == "web:local"
-    assert msg.platform == "websocket"
+    assert msg.platform == "web"
 
 
 def test_empty_message_is_not_delivered():
     """空消息不发请求（跟 CLI 的空行一致）——省一次无意义的模型调用。"""
-    a = WebSocketAdapter()
+    a = WebAdapter()
     with TestClient(a.app).websocket_connect("/ws") as ws:
         ws.send_json({"content": "   "})
         ws.send_json({"content": "有内容了"})
@@ -108,7 +108,7 @@ def test_pure_image_message_is_delivered():
 
     兔老师抓到：空守卫只看 content，纯图消息会被当空 `continue` 掉。
     """
-    a = WebSocketAdapter()
+    a = WebAdapter()
     with TestClient(a.app).websocket_connect("/ws") as ws:
         ws.send_json({"content": "", "images": ["pic.png"]})
         msg = _drain_inbox(a)
@@ -118,7 +118,7 @@ def test_pure_image_message_is_delivered():
 
 def test_truly_empty_message_still_dropped():
     """既无文字又无图，才是真空——仍要丢。"""
-    a = WebSocketAdapter()
+    a = WebAdapter()
     with TestClient(a.app).websocket_connect("/ws") as ws:
         ws.send_json({"content": "  "})
         ws.send_json({"content": "真消息"})
@@ -128,7 +128,7 @@ def test_truly_empty_message_still_dropped():
 
 
 def test_connection_registers_and_cleans_up_session():
-    a = WebSocketAdapter()
+    a = WebAdapter()
     with TestClient(a.app).websocket_connect("/ws?session_id=web:abc"):
         assert "web:abc" in a.connected_sessions()
     # 断开后应清理（否则连接表会一直涨）
@@ -136,7 +136,7 @@ def test_connection_registers_and_cleans_up_session():
 
 
 def test_two_sessions_are_tracked_separately():
-    a = WebSocketAdapter()
+    a = WebAdapter()
     client = TestClient(a.app)
     with client.websocket_connect("/ws?session_id=web:a"):
         with client.websocket_connect("/ws?session_id=web:b"):
@@ -150,7 +150,7 @@ def test_non_local_origin_is_rejected():
     """别的网页能连 /ws（WS 不受 CORS 限制）→ 必须在握手前拒掉。"""
     from starlette.websockets import WebSocketDisconnect as StarletteWSD
 
-    a = WebSocketAdapter()
+    a = WebAdapter()
     client = TestClient(a.app)
     with pytest.raises(StarletteWSD):
         with client.websocket_connect(
@@ -161,7 +161,7 @@ def test_non_local_origin_is_rejected():
 
 
 def test_local_origin_is_allowed():
-    a = WebSocketAdapter()
+    a = WebAdapter()
     client = TestClient(a.app)
     with client.websocket_connect(
         "/ws?session_id=web:local", headers={"Origin": "http://127.0.0.1:8000"}
@@ -171,14 +171,14 @@ def test_local_origin_is_allowed():
 
 def test_missing_origin_is_allowed():
     """非浏览器客户端（curl / 测试）没有 Origin → 放行（拦的是别的网页）。"""
-    a = WebSocketAdapter()
+    a = WebAdapter()
     with TestClient(a.app).websocket_connect("/ws?session_id=web:local"):
         assert "web:local" in a.connected_sessions()
 
 
 def test_cross_platform_session_id_is_downgraded():
     """客户端传 cli:/qq: 这类可预测的跨平台 id → 回落默认 web: 会话。"""
-    a = WebSocketAdapter()
+    a = WebAdapter()
     client = TestClient(a.app)
     with client.websocket_connect("/ws?session_id=cli:local"):
         assert "cli:local" not in a.connected_sessions()
@@ -187,14 +187,14 @@ def test_cross_platform_session_id_is_downgraded():
 
 def test_owner_is_always_local():
     """owner 固定 local，不读客户端字段（旧实现第一条消息就能写死任意 owner）。"""
-    a = WebSocketAdapter()
+    a = WebAdapter()
     m = a.normalize({"content": "x", "owner": "evil", "session_id": "web:local"})
     assert m.owner == "local"
 
 
 def test_bad_frame_does_not_drop_connection():
     """一条非法帧只被忽略，连接保持可用（旧实现会拆掉整条连接）。"""
-    a = WebSocketAdapter()
+    a = WebAdapter()
     client = TestClient(a.app)
     with client.websocket_connect("/ws?session_id=web:local") as ws:
         ws.send_text("这不是 JSON")
@@ -208,7 +208,7 @@ def test_bad_frame_does_not_drop_connection():
 
 
 async def test_send_pushes_reply_to_the_right_connection():
-    a = WebSocketAdapter()
+    a = WebAdapter()
     sock = FakeSocket()
     a._connections["web:local"] = sock
     await a.send(Reply(session_id="web:local", messages=["你好呀~"]))
@@ -218,7 +218,7 @@ async def test_send_pushes_reply_to_the_right_connection():
 
 async def test_send_payload_shape():
     """回包字段：messages 是列表、带 tool_calls_made 与 stop_reason。"""
-    a = WebSocketAdapter()
+    a = WebAdapter()
     sock = FakeSocket()
     a._connections["s1"] = sock
     await a.send(Reply(session_id="s1", messages=["一", "二"], tool_calls_made=2))
@@ -232,13 +232,13 @@ async def test_send_payload_shape():
 
 async def test_send_to_unknown_session_is_skipped_not_raised():
     """会话已断开（用户关了页面）→ 跳过，不抛：不该让前台循环崩在发不出去。"""
-    a = WebSocketAdapter()
+    a = WebAdapter()
     await a.send(Reply(session_id="never-connected", messages=["x"]))  # 不抛即通过
 
 
 async def test_send_failure_on_broken_socket_is_swallowed():
     """连接刚好在发送时断掉——记日志跳过，不把异常抛回前台循环。"""
-    a = WebSocketAdapter()
+    a = WebAdapter()
     sock = FakeSocket()
     sock.fail = True
     a._connections["s1"] = sock
@@ -254,7 +254,7 @@ def test_connect_pushes_history_to_client():
     没有这一步，"刷新后历史完整"只是数据完整——用户看到的是空白页。
     session_id 靠 localStorage 保住了、库里也有历史，但没人把它送到页面上。
     """
-    a = WebSocketAdapter(history_provider=lambda sid: [
+    a = WebAdapter(history_provider=lambda sid: [
         {"role": "user", "content": "你好"},
         {"role": "assistant", "content": "哟，来啦~"},
     ])
@@ -274,7 +274,7 @@ def test_history_provider_is_asked_for_the_right_session():
         asked.append(sid)
         return [{"role": "user", "content": "hi"}]
 
-    a = WebSocketAdapter(history_provider=provider)
+    a = WebAdapter(history_provider=provider)
     with TestClient(a.app).websocket_connect("/ws?session_id=web:xyz") as ws:
         ws.receive_json()  # 有历史才会推帧，这里等一下让它发出来
     assert asked == ["web:xyz"]
@@ -282,7 +282,7 @@ def test_history_provider_is_asked_for_the_right_session():
 
 def test_empty_history_sends_no_frame():
     """历史为空就不推帧——前端不会收到一个空的历史帧。"""
-    a = WebSocketAdapter(history_provider=lambda sid: [])
+    a = WebAdapter(history_provider=lambda sid: [])
     with TestClient(a.app).websocket_connect("/ws?session_id=s") as ws:
         ws.send_json({"content": "在吗"})
         import asyncio
@@ -292,7 +292,7 @@ def test_empty_history_sends_no_frame():
 
 def test_no_history_provider_means_no_history_frame():
     """没配 history_provider 时不发历史帧——保持零依赖可用（测试/裸连场景）。"""
-    a = WebSocketAdapter()
+    a = WebAdapter()
     with TestClient(a.app).websocket_connect("/ws?session_id=x") as ws:
         ws.send_json({"content": "在吗"})
         # 下一条应该是收件箱里的消息，而不是历史帧
@@ -303,7 +303,7 @@ def test_no_history_provider_means_no_history_frame():
 
 def test_history_frame_is_not_a_chat_message():
     """历史帧带 type=history，不能跟对话回复混——前端据此分流。"""
-    a = WebSocketAdapter(history_provider=lambda sid: [{"role": "user", "content": "hi"}])
+    a = WebAdapter(history_provider=lambda sid: [{"role": "user", "content": "hi"}])
     with TestClient(a.app).websocket_connect("/ws?session_id=s") as ws:
         frame = ws.receive_json()
     assert frame["type"] == "history"
@@ -321,7 +321,7 @@ def test_clear_frame_calls_clearer_and_replies():
         cleared.append(sid)
         return 3
 
-    a = WebSocketAdapter(clearer=clearer)
+    a = WebAdapter(clearer=clearer)
     with TestClient(a.app).websocket_connect("/ws?session_id=web:me") as ws:
         ws.send_json({"action": "clear", "session_id": "web:me"})
         frame = ws.receive_json()
@@ -333,7 +333,7 @@ def test_clear_frame_calls_clearer_and_replies():
 
 def test_clear_frame_is_not_a_chat_message():
     """清空帧不能被当成聊天消息投进收件箱（它没有 content）。"""
-    a = WebSocketAdapter(clearer=lambda sid: 0)
+    a = WebAdapter(clearer=lambda sid: 0)
     with TestClient(a.app).websocket_connect("/ws?session_id=s") as ws:
         ws.send_json({"action": "clear", "session_id": "s"})
         ws.receive_json()  # cleared 回执
@@ -344,7 +344,7 @@ def test_clear_frame_is_not_a_chat_message():
 
 def test_clear_without_clearer_replies_ok_but_zero():
     """没注入 clearer 时不报错——回 ok 且 deleted=0（清空不在核心链路上）。"""
-    a = WebSocketAdapter()
+    a = WebAdapter()
     with TestClient(a.app).websocket_connect("/ws?session_id=s") as ws:
         ws.send_json({"action": "clear", "session_id": "s"})
         frame = ws.receive_json()
@@ -357,7 +357,7 @@ def test_clear_failure_reports_not_ok():
     def boom(sid):
         raise RuntimeError("库坏了")
 
-    a = WebSocketAdapter(clearer=boom)
+    a = WebAdapter(clearer=boom)
     with TestClient(a.app).websocket_connect("/ws?session_id=s") as ws:
         ws.send_json({"action": "clear", "session_id": "s"})
         frame = ws.receive_json()
@@ -369,7 +369,7 @@ def test_clear_failure_reports_not_ok():
 
 def test_ws_endpoint_works_regardless_of_webui_dir():
     """webui/ 还没建时，/ws 也必须能用——聊天页是 M0-12，不该挡 WS 验收。"""
-    a = WebSocketAdapter()
+    a = WebAdapter()
     with TestClient(a.app).websocket_connect("/ws?session_id=x") as ws:
         ws.send_json({"content": "still works"})
         assert _drain_inbox(a).content == "still works"
