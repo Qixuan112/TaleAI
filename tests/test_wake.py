@@ -144,7 +144,7 @@ class FakeBot:
         self.calls = []
 
     async def run_loop(self, user_question, history=None, session_id="",
-                       *, session_type="", owner="", images=None):
+                       *, session_type="", owner="", images=None, quoted=""):
         self.calls.append((user_question, session_id))
         return Reply(session_id=session_id, messages=["好呀~"])
 
@@ -178,11 +178,11 @@ def wiring(store, clean_bus):
     return main, adapter, Router(reg), FakeBot(), store, clean_bus
 
 
-def group_msg(content, addressed=None):
+def group_msg(content, addressed=None, **extra):
     return Message(
         id="m1", platform="fake", session_id=SID, owner="u1",
         direction="in", role="user", content=content,
-        session_type="group", addressed=addressed,
+        session_type="group", addressed=addressed, **extra,
     )
 
 
@@ -200,6 +200,18 @@ async def test_group_message_without_wake_is_stored_but_not_answered(wiring):
     assert adapter.sent == []                   # 没发回
     assert store.count(SID) == 1                # 但落库了
     assert store.messages(SID)[0]["content"] == "今天天气不错"
+
+
+async def test_unwoken_message_still_persists_reply_to(wiring):
+    """未唤醒也照落 reply_to——"引用了哪条"是消息事实，与唤没唤醒无关。"""
+    main, adapter, router, bot, store, bus = wiring
+    policy = WakePolicy(words=("塔利",), scope="group")
+
+    await main.handle_message(
+        group_msg("这消息没叫我", reply_to="m0"),
+        router=router, store=store, bot=bot, bus=bus, wake=policy,
+    )
+    assert store.messages(SID)[0]["reply_to"] == "m0"
 
 
 async def test_group_message_with_keyword_is_answered(wiring):

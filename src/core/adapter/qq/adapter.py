@@ -11,7 +11,8 @@ app，main 里按需挂载。
 
 同一条连接上跑两种报文，靠字段区分（规范定义）：
 - 带 `post_type` → 事件（用户消息）
-- 带 `echo` → 我们发出动作的响应（不处理，只记 debug）
+- 带 `echo` → 我们发出动作的响应（有在途请求就兑现它——引用内容的
+  get_msg；没人等的只记 debug）
 
 **为什么 M0 不做正向 WS**：文档 §18-18 平台优先级只要求 QQ 能连上；
 反向 WS 省掉了"在代码里配 QQ 后端地址 + 自己实现断线重连"——重连由
@@ -27,7 +28,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 from core.adapter.base import AdapterBase, Message, Reply
 from core.adapter.pacing import typing_delay
-from core.adapter.qq.protocol import build_send_action, parse_event
+from core.adapter.qq.protocol import build_send_action, extract_message_text, parse_event
 from core.event_bus import EventBus
 from core.image_store import MAX_IMAGES_PER_MESSAGE, download as download_image
 
@@ -36,6 +37,12 @@ logger.addHandler(logging.NullHandler())
 
 #: 去重窗口：平台重发（断线重连）会带同一个 message_id
 _DEDUP_MAX = 1000
+
+#: get_msg 等"主动问一句"的应答超时（秒）。超时 = 没拿到：引用内容降级为空。
+_API_TIMEOUT = 2.0
+
+#: 引用内容截断长度——只给模型看个大意，全文既费 token 也没必要
+QUOTED_MAX_CHARS = 200
 
 
 class QQAdapter(AdapterBase):
@@ -60,6 +67,11 @@ class QQAdapter(AdapterBase):
         self.access_token: str = ""
         # 已见过的 message_id（FIFO 淘汰）
         self._seen_ids: OrderedDict[str, None] = OrderedDict()
+        # 在途的 API 应答（echo → Future）：引用内容要发 get_msg 再等回包
+        self._pending: dict[str, asyncio.Future] = {}
+        # 引用消息的后台补全任务（要等应答、不能卡收包循环——见 _on_frame）。
+        # 持引用防 GC：asyncio 对任务只持弱引用，不管它就可能在跑一半时被回收。
+        self._bg_tasks: set[asyncio.Task] = set()
         self.app = self._build_app()
 
     @staticmethod
@@ -235,18 +247,26 @@ class QQAdapter(AdapterBase):
                 # 只在仍是当前这条连接时清理，避免误删重连后的新连接
                 if self._link is websocket:
                     self._link = None
+                # 在途请求全取消：连接没了应答永远不会来，等应答的那边
+                # （补引用的后台任务）不取消就要白等一整段超时。
+                self._cancel_pending()
                 logger.info("QQ 已断开：bot_id=%s", self.bot_id)
 
         return app
 
     async def _on_frame(self, raw: dict) -> None:
-        """处理一帧：消息事件 → 入队；API 响应 → 忽略。"""
+        """处理一帧：消息事件 → 补完尾巴入队；API 响应 → 兑现在途请求。"""
         if not isinstance(raw, dict):
             return
 
-        # 我们发出动作的应答（带 echo）：M0 不关心发送结果，记 debug 即可
+        # 我们发出动作的应答（带 echo）：有在途请求（补引用的 get_msg）就
+        # 先兑现它；没人在等的（send_* 的应答）记 debug 即可。
         if "echo" in raw and "post_type" not in raw:
-            logger.debug("QQ API 响应：%s", raw.get("status"))
+            fut = self._pending.pop(raw.get("echo"), None)
+            if fut is not None and not fut.done():
+                fut.set_result(raw)
+            else:
+                logger.debug("QQ API 响应：%s", raw.get("status"))
             return
 
         message = self.normalize(raw)
@@ -261,6 +281,39 @@ class QQAdapter(AdapterBase):
             self._seen_ids[message.id] = None
             while len(self._seen_ids) > _DEDUP_MAX:
                 self._seen_ids.popitem(last=False)
+
+        # 尾巴（补引用 → 下图 → @ 判定 → 投递）统一走 _finish_message。
+        # 引用消息要发 get_msg 等应答，而应答帧走的就是**这条收包循环**——
+        # 在这里 inline await 会死锁（循环在等自己回包）。所以引用消息把
+        # 尾巴丢给独立任务；非引用消息照旧 inline await（行为不变）。
+        # 副作用：引用消息的处理会与紧随其后的消息乱序——M0 单机可接受，
+        # 真需要严格顺序时再上处理器队列（YAGNI）。
+        if message.reply_to:
+            task = asyncio.create_task(self._finish_message(message))
+            self._bg_tasks.add(task)  # 持引用防 GC
+            task.add_done_callback(self._on_bg_task_done)
+        else:
+            await self._finish_message(message)
+
+    def _on_bg_task_done(self, task: asyncio.Task) -> None:
+        """后台补全任务的收尾：清引用、捞异常（不捞会打"never retrieved"）。"""
+        self._bg_tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error("引用消息补全失败，这条已丢弃：%s", exc)
+
+    async def _finish_message(self, message: Message) -> None:
+        """消息处理的尾巴：补引用内容 → 下载图片 → @ 判定 → 投递入队。
+
+        拆出来是为了让引用消息能走 create_task（见 _on_frame 的死锁说明）。
+        """
+        # 引用内容：reply 段只有被引用消息的 ID，内容要再发一个 get_msg 拉。
+        # 个别实现在 reply 段里内联了原文——有就直接用，省一次往返。
+        # 拉不到（超时/断开/被撤回）降级为空串：只回正文仍然成立。
+        if message.reply_to and not message.quoted:
+            message.quoted = await self._fetch_quoted(message.reply_to)
 
         # 图片（UX-08）：把 OneBot 给的图片 URL 下载落地成文件名，填进 images。
         # 下载是阻塞 I/O，用 to_thread 丢给线程池，别卡住事件循环（其它消息
@@ -290,6 +343,62 @@ class QQAdapter(AdapterBase):
                              message.session_id)
 
         self._deliver(self._strip_bot_mention(message))
+
+    # ---------- 主动动作：发一个 API 请求并等应答 ----------
+
+    async def _call_api(
+        self, action: str, params: dict, *, timeout: float | None = None
+    ) -> dict | None:
+        """发一个 OneBot 动作并等它的 echo 应答，返回应答的 data 字段。
+
+        失败一律降级为 None（不抛）：调用方（补引用）本来就有"拿不到就
+        当没有"的路径，上抛只会把整条消息卡住。
+
+        echo 用 `call-` 前缀：与发送用的 `send-` 分族、且带 uuid 全局唯一，
+        在途多个请求也绝不会错配。
+        """
+        if self._link is None:
+            return None
+        if timeout is None:
+            timeout = _API_TIMEOUT
+        echo = f"call-{uuid.uuid4().hex}"
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._pending[echo] = fut
+        try:
+            await self._link.send_json({"action": action, "params": params, "echo": echo})
+            resp = await asyncio.wait_for(fut, timeout)
+        except Exception:
+            return None
+        finally:
+            self._pending.pop(echo, None)
+        if (not isinstance(resp, dict) or resp.get("status") != "ok"
+                or resp.get("retcode") != 0):
+            return None
+        data = resp.get("data")
+        return data if isinstance(data, dict) else None
+
+    async def _fetch_quoted(self, message_id: str) -> str:
+        """拉被引用消息的文本内容（get_msg），截断到 QUOTED_MAX_CHARS。
+
+        任何失败（超时/断开/被撤回/权限）都返回空串——引用内容只是锦上
+        添花，"拿不到就只回正文"必须仍然成立，绝不能让一次 get_msg 失败
+        把整条消息卡死或丢掉。
+        """
+        try:
+            mid: int | str = int(message_id)  # OneBot 的 message_id 是 number
+        except (TypeError, ValueError):
+            mid = message_id  # 非纯数字就原样传，后端认不认是它的事
+        data = await self._call_api("get_msg", {"message_id": mid})
+        if not isinstance(data, dict):
+            return ""
+        return extract_message_text(data.get("message")).strip()[:QUOTED_MAX_CHARS]
+
+    def _cancel_pending(self) -> None:
+        """取消所有在途的 API 请求（断连时调）。见 endpoint finally 的说明。"""
+        for fut in self._pending.values():
+            if not fut.done():
+                fut.cancel()
+        self._pending.clear()
 
     def _download_images(self, urls: list[str]) -> list[str]:
         """下载一组图片 URL → 文件名列表（失败/非图跳过）。阻塞，由 to_thread 调。"""

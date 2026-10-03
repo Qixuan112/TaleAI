@@ -192,6 +192,7 @@ class ChatLLM:
         self, user_question: str, history: list[dict[str, str]] | None = None,
         session: "SessionContext | None" = None,
         images: list[str] | None = None,
+        quoted: str = "",
     ) -> list[dict[str, str]]:
         """装配：稳定前缀（人格 system）+ 会动尾巴（历史 + 最新提问）。
 
@@ -209,6 +210,11 @@ class ChatLLM:
         ——历史里的图不回流喂模型（历史是"数据"不是"指令"），这也是为什么
         只有最后一条能带图。有图时最新 user 的 content 变成 OpenAI 多模态
         content 数组；没图时**保持纯字符串**（文本路径一个字节都不变）。
+
+        quoted（PR2）：被引用消息的文本（QQ 引用回复由适配器补出来）。
+        插在动态块与正文之间**独立一行**，让模型知道"他在回哪句话"。
+        同 reminder 一样：只进本次请求、不落库（它是"这次对话的背景"，
+        不是历史原文）；转义要求也同用户提问——见下。
         """
         messages: list[dict[str, str]] = [
             {"role": "system", "content": self.persona.build_system_prompt()},  # 稳定 → 前缀
@@ -236,7 +242,16 @@ class ChatLLM:
         # 写一句 <system_reminder>…</system_reminder> 就能伪造系统提示
         # （PR #10 High）。转义只动标记字符，用户的话其余照旧。
         safe_question = escape_tag_markers(user_question)
-        text = f"{reminder}\n{safe_question}" if reminder else safe_question
+        parts: list[str] = []
+        if reminder:
+            parts.append(reminder)
+        if quoted:
+            # 引用内容也是**外部文本**（别人在 QQ 里说的话）——同样要转义，
+            # 否则被引用的原话里写 <system_reminder>… 就能伪造系统块（同一个洞）。
+            parts.append(f"（引用了一条消息：{escape_tag_markers(quoted)}）")
+        parts.append(safe_question)
+        # 没 reminder 没 quoted 时 join 结果 == safe_question，文本路径不变
+        text = "\n".join(parts)
 
         # 有图：最新提问发成 content 数组（图 + 文本）。图读不出（已被回收/
         # 文件缺失）就跳过它——不能让"图没了"把整条消息变得发不出去。
@@ -331,7 +346,7 @@ class ChatLLM:
     async def run_loop(
         self, user_question: str, history: list[dict[str, str]] | None = None,
         session_id: str = "", *, session_type: str = "", owner: str = "",
-        images: list[str] | None = None,
+        images: list[str] | None = None, quoted: str = "",
     ) -> Reply:
         """FC 循环（§18.1 第 6 步）：最多 max_agent_steps 轮。
 
@@ -340,6 +355,9 @@ class ChatLLM:
         session_type / owner 由调用方（前台循环）从 Message 里带过来，构成
         SessionContext 交给装配——模型据此知道自己在群聊还是私聊（§十二）。
         不传也能跑，只是模型看不到会话类型（命令行/单测如此）。
+
+        quoted（PR2）：被引用消息的文本（QQ 引用回复）。属于"这次请求的
+        动态背景"，随装配插到最新提问前——只进本次请求，不落库。
 
         ⚠️ 与 §19-2 的偏离（实测逼出来的）：文档写「每轮必须先产出 <msg>
         才允许携带 FC」，但真实模型第一轮就是**纯工具调用、content 为 None**
@@ -353,7 +371,7 @@ class ChatLLM:
             session_id=session_id, session_type=session_type, owner=owner
         )
         messages = self.assemble_messages(user_question, history, session=session,
-                                          images=images)
+                                          images=images, quoted=quoted)
         tools = self.registry.tool_schemas()
         # 记下本次会话 ID，_tool_message 发 tool.called 时用（旁路事件标注来源）
         self._current_session_id = session_id

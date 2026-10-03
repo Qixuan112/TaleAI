@@ -18,9 +18,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from core.adapter import qq as qq_pkg
-from core.adapter.base import Reply
+from core.adapter.base import Message, Reply
 from core.adapter.qq import adapter as qq_adapter_mod
-from core.adapter.qq.adapter import QQAdapter
+from core.adapter.qq.adapter import QUOTED_MAX_CHARS, QQAdapter
 from core.event_bus import EventBus
 
 
@@ -483,3 +483,161 @@ def test_stop_requests_uvicorn_shutdown():
 def test_stop_without_server_is_safe():
     a = QQAdapter()
     a.stop()  # 不抛即通过
+
+
+# ---------- 引用内容（PR2：get_msg 拉被引用消息）----------
+
+
+def reply_event(reply_id="42", text="这句怎么样", inline=None):
+    """引用了一条消息的私聊事件。inline 非 None 时模拟"reply 段内联原文"。"""
+    data = {"id": reply_id}
+    if inline is not None:
+        data["text"] = inline
+    return private_event(text=[
+        {"type": "reply", "data": data},
+        {"type": "text", "data": {"text": text}},
+    ])
+
+
+def test_quoted_content_is_fetched_via_get_msg():
+    """引用消息：适配器应发 get_msg，把被引用原文填进 Message.quoted。
+
+    这条测试同时钉住**不死锁**：_on_frame 若 inline await get_msg 应答，
+    应答帧走同一个收包循环、永远送不进来——ws.receive_json 会在这里挂死。
+    """
+    a = QQAdapter()
+    with TestClient(a.app).websocket_connect("/qq") as ws:
+        ws.send_json(reply_event(reply_id="42"))
+        # 服务端发出的下一个动作应当是 get_msg（在等它的应答）
+        action = ws.receive_json()
+        assert action["action"] == "get_msg"
+        assert action["params"]["message_id"] == 42
+        ws.send_json({
+            "status": "ok", "retcode": 0,
+            "data": {"message_id": 42, "message": [
+                {"type": "text", "data": {"text": "被引用的原话"}},
+            ]},
+            "echo": action["echo"],
+        })
+        m = _drain(a)
+    assert m.reply_to == "42"
+    assert m.quoted == "被引用的原话"
+
+
+def test_quoted_fetch_failure_degrades_to_no_quote(monkeypatch):
+    """get_msg 超时：消息照常投递，只是 quoted 为空——不能卡死链路。"""
+    monkeypatch.setattr(qq_adapter_mod, "_API_TIMEOUT", 0.05)
+    a = QQAdapter()
+    with TestClient(a.app).websocket_connect("/qq") as ws:
+        ws.send_json(reply_event())
+        ws.receive_json()  # get_msg 动作，但故意不应答
+        m = _drain(a)
+    assert m.quoted == ""
+    assert m.content == "这句怎么样"
+
+
+def test_inline_quoted_text_skips_get_msg():
+    """reply 段自带原文：直接用，不发 get_msg 动作。"""
+    a = QQAdapter()
+    link = FakeLink()
+    a._link = link
+    msg = Message(
+        id="m9", platform="qq", session_id="qq:p1", owner="u1",
+        direction="in", role="user", content="回你",
+        reply_to="777", quoted="内联的原文",
+    )
+    asyncio.run(a._finish_message(msg))
+    assert link.sent == []       # 没发任何动作
+    assert a._inbox.qsize() == 1  # 照常投递
+
+
+async def test_fetch_quoted_truncates_to_limit():
+    """被引用原文过长 → 截到 QUOTED_MAX_CHARS（只给模型看个大意）。"""
+    a = QQAdapter()
+
+    async def fake_call(action, params, *, timeout=None):
+        assert action == "get_msg"
+        return {"message": [{"type": "text", "data": {"text": "长" * 500}}]}
+
+    a._call_api = fake_call
+    text = await a._fetch_quoted("42")
+    assert len(text) == QUOTED_MAX_CHARS
+
+
+async def test_fetch_quoted_passes_numeric_message_id():
+    """OneBot 的 message_id 是 number：合法数字串要转回 int 再发。"""
+    a = QQAdapter()
+    seen = {}
+
+    async def fake_call(action, params, *, timeout=None):
+        seen.update(params)
+        return None
+
+    a._call_api = fake_call
+    await a._fetch_quoted("42")
+    assert seen == {"message_id": 42}
+
+
+async def test_call_api_resolves_on_ok_echo():
+    """_call_api 发动作、收到同 echo 的 ok 应答 → 返回 data。"""
+    a = QQAdapter()
+    link = FakeLink()
+    a._link = link
+
+    async def respond():
+        await asyncio.sleep(0)  # 让 _call_api 先把动作发出去
+        assert link.sent[0]["action"] == "get_msg"
+        await a._on_frame({"status": "ok", "retcode": 0, "data": {"k": 1},
+                           "echo": link.sent[0]["echo"]})
+
+    t = asyncio.create_task(respond())
+    data = await a._call_api("get_msg", {"message_id": 1})
+    await t
+    assert data == {"k": 1}
+    assert a._pending == {}  # 用完即清，不留残骸
+
+
+async def test_call_api_timeout_returns_none(monkeypatch):
+    monkeypatch.setattr(qq_adapter_mod, "_API_TIMEOUT", 0.02)
+    a = QQAdapter()
+    a._link = FakeLink()
+    assert await a._call_api("get_msg", {"message_id": 1}) is None
+    assert a._pending == {}
+
+
+async def test_call_api_error_retcode_returns_none():
+    """retcode != 0（如"消息不存在/无法获取"）→ 当失败，返回 None。"""
+    a = QQAdapter()
+    link = FakeLink()
+    a._link = link
+
+    async def respond():
+        await asyncio.sleep(0)
+        await a._on_frame({"status": "failed", "retcode": 100, "data": None,
+                           "echo": link.sent[0]["echo"]})
+
+    t = asyncio.create_task(respond())
+    assert await a._call_api("get_msg", {}) is None
+    await t
+
+
+async def test_call_api_without_link_returns_none():
+    assert await QQAdapter()._call_api("get_msg", {}) is None
+
+
+async def test_cancel_pending_cancels_futures():
+    """断连时在途请求全取消——不然等应答的那边要白等一整段超时。"""
+    a = QQAdapter()
+    fut = asyncio.get_running_loop().create_future()
+    a._pending["call-x"] = fut
+    a._cancel_pending()
+    assert fut.cancelled()
+    assert a._pending == {}
+
+
+async def test_send_echo_still_ignored_when_nobody_waits():
+    """没人等的应答（send_* 的回包）不进 pending、不该被当消息投递。"""
+    a = QQAdapter()
+    await a._on_frame({"status": "ok", "retcode": 0, "data": {},
+                       "echo": "send-qq:p1-abc123"})
+    assert a._inbox.qsize() == 0

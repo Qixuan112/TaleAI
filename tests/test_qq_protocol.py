@@ -18,6 +18,7 @@ import pytest
 
 from core.adapter.qq.protocol import (
     build_send_action,
+    extract_message_text,
     parse_event,
     parse_session_id,
 )
@@ -201,6 +202,82 @@ def test_array_format_at_segment_becomes_mention():
 def test_mentions_empty_when_no_at():
     m = parse_event(private_event(message="没有 at"))
     assert m.mentions == []
+
+
+# ---------- 引用回复（PR2）----------
+
+
+def test_reply_segment_extracts_id():
+    """array 形态的 reply 段 → reply_to 填被引用消息 ID；段本身不进正文。"""
+    m = parse_event(private_event(message=[
+        {"type": "reply", "data": {"id": "777"}},
+        {"type": "text", "data": {"text": "这句怎么样"}},
+    ]))
+    assert m.reply_to == "777"
+    assert m.content == "这句怎么样"
+
+
+def test_reply_segment_inline_text_is_kept():
+    """个别实现在 reply 段里内联被引用原文——有就直接用（省一次 get_msg）。"""
+    m = parse_event(private_event(message=[
+        {"type": "reply", "data": {"id": "777", "text": "被引用的原话"}},
+        {"type": "text", "data": {"text": "回你"}},
+    ]))
+    assert m.reply_to == "777"
+    assert m.quoted == "被引用的原话"
+
+
+def test_reply_id_numeric_is_stringified():
+    """message_id 是 number——统一转成字符串（与 Message.id 同形）。"""
+    m = parse_event(private_event(message=[
+        {"type": "reply", "data": {"id": 777}},
+        {"type": "text", "data": {"text": "x"}},
+    ]))
+    assert m.reply_to == "777"
+
+
+def test_reply_string_form_cq_code():
+    """messageFormat=string：[CQ:reply,id=777] 也要认出来，且从正文剥掉。"""
+    m = parse_event(private_event(message="[CQ:reply,id=777] 回你"))
+    assert m.reply_to == "777"
+    assert m.quoted == ""
+    assert "[CQ:" not in m.content
+
+
+def test_no_reply_means_none_and_empty():
+    m = parse_event(private_event(message="普通消息"))
+    assert m.reply_to is None
+    assert m.quoted == ""
+
+
+def test_malformed_reply_segment_ignored():
+    """reply 段畸形（没有 id / 缺 data）→ 当作没有引用，不猜、不抛。"""
+    m = parse_event(private_event(message=[
+        {"type": "reply", "data": {}},
+        {"type": "text", "data": {"text": "x"}},
+    ]))
+    assert m.reply_to is None
+
+
+# ---------- extract_message_text（get_msg 响应复用）----------
+
+
+def test_extract_message_text_array_joins_text_segments():
+    text = extract_message_text([
+        {"type": "text", "data": {"text": "第一段"}},
+        {"type": "image", "data": {"url": "https://x/a.png"}},
+        {"type": "text", "data": {"text": "第二段"}},
+    ])
+    assert text == "第一段第二段"
+
+
+def test_extract_message_text_string_strips_cq():
+    assert extract_message_text("[CQ:image,file=x.jpg]看图") == "看图"
+
+
+def test_extract_message_text_malformed_gives_empty():
+    assert extract_message_text(None) == ""
+    assert extract_message_text(123) == ""
 
 
 # ---------- 信封分流：事件 vs API 响应 vs 其他 ----------

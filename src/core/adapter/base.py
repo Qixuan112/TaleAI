@@ -48,8 +48,8 @@ class Reply:
 class Message:
     """平台消息的统一形状（§18.3）。
 
-    字段顺序与文档一致。后四个给了默认值，只是为了构造时省事——语义上
-    mentions / reply_to 在 M0 都是空的（方案 B 先立字段，M3 跨会话才用）。
+    字段顺序与文档一致；带默认值的字段只是构造时省事——平台给得出什么，
+    适配器就填什么（QQ 已反解 @ 与引用；其余平台留空）。
     """
 
     id: str  # 全局唯一消息 ID
@@ -59,8 +59,15 @@ class Message:
     direction: str  # in / out
     role: str  # user / assistant / system
     content: str  # 正文（不含 system_reminder）
-    mentions: list[str] = field(default_factory=list)  # @ 提及（M0 空）
-    reply_to: str | None = None  # 引用回复的消息 ID（M0 为 None）
+    mentions: list[str] = field(default_factory=list)  # @ 提及（QQ 已反解）
+    reply_to: str | None = None  # 引用回复的消息 ID（None = 没有引用；QQ 已填）
+    # 被引用消息的**文本内容**（reply_to 是 ID，这个是内容本身）。
+    #
+    # ⚠️ 对 §18.3 的补充（基线 Message 没有这个字段）：QQ 的 reply 段只给
+    # 消息 ID，模型拿 ID 没有任何用处——"他在回哪句话"必须把内容补出来。
+    # 适配器负责（QQ：再发一个 get_msg 拉原文），装配时只进本次请求、不落库。
+    # 空串 = 没有引用，或内容没拉到（降级为"只知有引用、不知内容"）。
+    quoted: str = ""
     ts: float = 0.0
     meta: dict[str, Any] = field(default_factory=dict)  # 平台私有字段，只透传
     # 会话类型：private / group。与 sessions.kind（§18.3）同义。
