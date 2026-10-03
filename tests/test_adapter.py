@@ -67,8 +67,9 @@ def test_message_has_documented_fields():
         id="m1", platform="web", session_id="web:local", owner="local",
         direction="in", role="user", content="你好",
     )
-    assert m.mentions == []  # M0 空列表占位（方案 B）
+    assert m.mentions == []  # 默认空列表占位
     assert m.reply_to is None
+    assert m.quoted == ""    # 引用内容补充字段（PR2），默认空
     assert m.meta == {}
 
 

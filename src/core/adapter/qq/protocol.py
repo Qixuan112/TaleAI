@@ -106,6 +106,53 @@ def extract_image_urls(message) -> list[str]:
     return urls
 
 
+def extract_reply(message) -> tuple[str | None, str]:
+    """从 message 段里取出「引用回复」→ (被引用消息 ID, 内联的引用文本)。
+
+    QQ 引用某条消息时，message 里会多一段：
+    - array：`{"type": "reply", "data": {"id": "123"}}`（个别实现还会内联
+      `data.text`——有就直接用，省一次 get_msg 往返）
+    - string：`"[CQ:reply,id=123]"`
+
+    被引用消息的**内容**一般拿不到，只有 ID——补内容要再发 get_msg
+    （那是适配器层的活，要网络），本模块只负责把 ID 抠出来。
+    返回 (None, "") 表示这条消息没有引用。
+    """
+    if isinstance(message, list):
+        for seg in message:
+            if not isinstance(seg, dict) or seg.get("type") != "reply":
+                continue
+            data = seg.get("data") or {}
+            rid = data.get("id")
+            if rid is None:
+                return None, ""  # 段畸形（没有 id）：当没有引用，不猜
+            text = data.get("text")
+            return str(rid), (str(text) if text else "")
+        return None, ""
+
+    if isinstance(message, str):
+        m = re.search(r"\[CQ:reply,([^\]]*)\]", message)
+        if not m:
+            return None, ""
+        for part in m.group(1).split(","):
+            k, _, v = part.partition("=")
+            if k.strip() == "id" and v:
+                return v, ""
+        return None, ""
+
+    return None, ""
+
+
+def extract_message_text(message) -> str:
+    """把 message 字段取成纯文本（get_msg 响应复用同一套解析）。
+
+    引用场景只要文字——图/表情段剥掉没有损失（把图 URL 喂给模型也没用）。
+    array 拼 text 段、string 剥 CQ 码，与消息事件的解析保持一致
+    （复用 `_extract_text_and_mentions`，只丢 mentions）。
+    """
+    return _extract_text_and_mentions(message)[0]
+
+
 def _session_id(message_type: str, target_id) -> str:
     if message_type == "private":
         return f"{_PRIVATE_PREFIX}{target_id}"
@@ -146,6 +193,9 @@ def parse_event(data: dict) -> Message | None:
     # 图片 URL 先捞出来放 meta——真正的下载落地是适配器层的事（要网络），
     # 本模块保持纯函数。适配器读完 meta 会 download → 填进 Message.images。
     image_urls = extract_image_urls(data.get("message"))
+    # 引用回复：reply 段只给被引用消息的 ID；内容由适配器层补
+    # （内联 text 有就直接带上，没有就留空、让适配器去 get_msg 拉）。
+    reply_id, quoted = extract_reply(data.get("message"))
 
     return Message(
         id=str(data.get("message_id") or ""),
@@ -156,7 +206,8 @@ def parse_event(data: dict) -> Message | None:
         role="user",
         content=content.strip(),
         mentions=mentions,
-        reply_to=None,
+        reply_to=reply_id,
+        quoted=quoted.strip(),
         ts=float(data.get("time") or 0),
         meta={"message_type": message_type, "self_id": data.get("self_id"),
               "image_urls": image_urls},

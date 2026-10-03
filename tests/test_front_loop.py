@@ -52,10 +52,12 @@ class FakeBot:
         self.error = error
         self.on_call = on_call
         self.calls: list[tuple] = []
+        self.quoted_seen: list[str] = []
 
     async def run_loop(self, user_question, history=None, session_id="",
-                       *, session_type="", owner="", images=None):
+                       *, session_type="", owner="", images=None, quoted=""):
         self.calls.append((user_question, list(history or []), session_id))
+        self.quoted_seen.append(quoted)
         if self.on_call:
             self.on_call(user_question, history, session_id)
         if self.error:
@@ -104,10 +106,10 @@ def wiring(store, clean_bus):
     return call, adapter, bot, store, clean_bus
 
 
-def make_message(content="你好", *, platform="fake", session_id=SID):
+def make_message(content="你好", *, platform="fake", session_id=SID, **extra):
     return Message(
         id="m1", platform=platform, session_id=session_id, owner="local",
-        direction="in", role="user", content=content,
+        direction="in", role="user", content=content, **extra,
     )
 
 
@@ -177,6 +179,21 @@ async def test_model_receives_pre_write_history_not_the_new_question_twice(store
     # 历史里不该出现"现在几点"——它作为最新提问单独传
     assert all("现在几点" not in m["content"] for m in history)
     assert history[-1]["content"] == "早呀~"
+
+
+async def test_reply_to_persisted_and_quoted_passed_to_model(wiring):
+    """引用回复（PR2）：reply_to（引用了哪条）落库；quoted（内容）只喂模型。
+
+    分工不能混：reply_to 是消息的结构化事实（§18.3 的列），落库；
+    quoted 是"这次请求的对话背景"（同 reminder 的 persist=False 精神），
+    不落库——否则历史里每轮都拖着一截引用原文，上下文会滚雪球。
+    """
+    call, adapter, bot, store, bus = wiring
+    await call(make_message("这句怎么样", reply_to="m0", quoted="被引用的原话"))
+    row = store.messages(SID)[0]
+    assert row["reply_to"] == "m0"
+    assert row["content"] == "这句怎么样"      # quoted 不进正文
+    assert bot.quoted_seen == ["被引用的原话"]  # 且确实传给了模型
 
 
 async def test_blank_message_is_ignored(store, clean_bus):
