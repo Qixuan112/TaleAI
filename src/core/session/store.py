@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS messages(
   mentions TEXT,
   reply_to TEXT,
   tool_json TEXT,
+  attachments TEXT,                 -- 图片文件名 JSON 数组（UX-06 多模态）
   ts REAL NOT NULL
 );
 
@@ -93,6 +94,12 @@ class SessionStore:
             # 外键约束默认关闭，messages.session_id 的 REFERENCES 要它才生效
             conn.execute("PRAGMA foreign_keys=ON")
             conn.executescript(_SCHEMA)
+            # 旧库补列：attachments 是 UX-06 加的，已存在的 messages 表没有它。
+            # 幂等——列已存在时 ALTER 会报错，忽略即可（schema 字段只增不改，§18.3）。
+            try:
+                conn.execute("ALTER TABLE messages ADD COLUMN attachments TEXT")
+            except sqlite3.OperationalError:
+                pass
             conn.commit()
         except Exception:
             conn.close()
@@ -175,11 +182,15 @@ class SessionStore:
         tool_json: str | dict | list | None = None,
         mentions: list[str] | None = None,
         reply_to: str | None = None,
+        attachments: list[str] | None = None,
         ts: float | None = None,
     ) -> int:
         """追加一条消息，返回它的 seq。
 
         收即存（§18.1 第 4/7 步）：用户消息一收到就落库，崩溃不丢。
+
+        attachments：本条消息带的图片文件名列表（UX-06）。只存文件名，
+        图片本体在 data/temp/img/（可回收）——两者生命周期不同，不混存。
         """
         if role not in {"user", "assistant", "system"}:
             raise ValueError(f"非法的 role: {role!r}")
@@ -196,15 +207,17 @@ class SessionStore:
             tool_json = json.dumps(tool_json, ensure_ascii=False)
         if mentions is not None:
             mentions = json.dumps(mentions, ensure_ascii=False)
+        if attachments is not None:
+            attachments = json.dumps(attachments, ensure_ascii=False)
 
         with self._lock:
             cur = self._db.execute(
                 """
-                INSERT INTO messages(session_id, role, content, mentions, reply_to, tool_json, ts)
-                VALUES(?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO messages(session_id, role, content, mentions, reply_to, tool_json, attachments, ts)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (session_id, role, content, mentions, reply_to, tool_json,
-                 time.time() if ts is None else ts),
+                 attachments, time.time() if ts is None else ts),
             )
             self._db.commit()
             return int(cur.lastrowid)
@@ -214,6 +227,11 @@ class SessionStore:
 
         返回 [{"role", "content"}]——正是 assemble_messages 需要的形状，
         这样调用方不用再做一次转换。
+
+        ❗attachments 有意**不进返回值**：history() 的消费者（ChatLLM 装配、
+        WebUI 历史帧）走的是"文本为主"的路径，喂历史里的图给模型是 UX-07/08
+        的事。要图请用 messages()。这样也保住了 `history() == [{role, content}]`
+        这个被多处测试钉死的契约。
 
         limit 取的是**最近** N 条（尾部），但返回时仍是正序——
         直接 `ORDER BY seq DESC LIMIT n` 会得到倒序，得在内存里翻回来。

@@ -54,7 +54,7 @@ class FakeBot:
         self.calls: list[tuple] = []
 
     async def run_loop(self, user_question, history=None, session_id="",
-                       *, session_type="", owner=""):
+                       *, session_type="", owner="", images=None):
         self.calls.append((user_question, list(history or []), session_id))
         if self.on_call:
             self.on_call(user_question, history, session_id)

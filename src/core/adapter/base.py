@@ -79,6 +79,15 @@ class Message:
     #
     # ⚠️ 对 §18.3 的补充（基线 Message 没有这个字段），同 session_type 的理由。
     addressed: bool | None = None
+    # 这条消息带的图片（文件名列表，UX-06）。空 = 纯文本消息。
+    #
+    # ⚠️ 对 §18.3 的补充（基线 Message 没有这个字段）：多模态输入的载体。
+    # 为什么存**文件名**而不是内容/base64：图片本体在 data/temp/img/（可回收，
+    # 超 100MB 删最早），库里/SQLite 里只留引用——两者生命周期不同，不混存。
+    #
+    # 硬规则：**只有最后一条**带图才生效（ChatLLM 只把最新提问发成 content 数组）。
+    # 历史里的图是"数据"，不是"指令"——不回流喂模型（UX-07）。
+    images: list[str] = field(default_factory=list)
 
 
 class AdapterBase(ABC):

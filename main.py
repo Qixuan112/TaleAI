@@ -88,8 +88,10 @@ async def handle_message(
     """
     session_id = message.session_id
 
-    # 空白消息：不发请求、不落库（跟 CLI 的空行一致，省一次无意义调用）
-    if not message.content.strip():
+    # 空白消息：不发请求、不落库（跟 CLI 的空行一致，省一次无意义调用）。
+    # 例外：带图的消息即使没文字也算"有内容"——纯图片是合法输入（UX-06），
+    # 模型看图不需要配文。
+    if not message.content.strip() and not message.images:
         return None
 
     # 唤醒门（§UX-03）：群里没叫它 → 存进历史但不回。
@@ -136,7 +138,8 @@ async def handle_message(
     # 躺在 history 末尾和"最新提问"里，重复发一遍。
     history = store.history(session_id)
     try:
-        store.append(session_id, "user", message.content)
+        store.append(session_id, "user", message.content,
+                     attachments=list(message.images or []) or None)
     except Exception:
         # 用户消息存不下来，这轮干脆不调模型——免得用户以为已经发出去了
         logger.exception("用户消息落库失败，跳过本轮")
@@ -144,10 +147,12 @@ async def handle_message(
 
     # 第 5~6 步：装配 + FC 循环（装配在 run_loop 内部完成，§18.5 硬规则 6）。
     # 会话类型/owner 一路带给装配——模型据此知道自己在群聊还是私聊（§十二）
+    # images（UX-06）：这条消息带的图，只作用于最新提问，不回流历史。
     try:
         reply = await bot.run_loop(
             message.content, history, session_id,
             session_type=message.session_type, owner=message.owner,
+            images=list(message.images or []),
         )
     except Exception as exc:
         reply = _close_turn_on_error(store, session_id, exc)
@@ -286,13 +291,19 @@ def _build(bus: EventBus | None = None):
     # 用回调而不是把 store 塞给适配器——适配器不该认识 SessionStore（§22 import 单向）。
     # clearer 同理：网页上「清空本次历史」要能删库，但适配器只认「(session_id)->删了几条」。
     # extra_routes 同理：设置读写要碰 Config，但适配器不该认识它——main 把
-    # 「注册 /api/settings/* 的业务路由」这件事当回调递进去（UX-01 的注入缝）。
+    # 「注册 /api/* 的业务路由」这件事当回调递进去（UX-01 的注入缝）。
+    # 设置读写（UX-05）+ 图片上传（UX-07）各造一个注册器，串起来一起挂。
     from core.config.api import build_settings_routes
+    from core.image_api import build_upload_routes
+
+    def _control_plane(app) -> None:
+        build_settings_routes()(app)
+        build_upload_routes()(app)
 
     ws_adapter = WebSocketAdapter(
         bus=bus, port=_resolve_ws_port(), history_provider=store.history,
         clearer=store.clear, stream=stream,
-        extra_routes=build_settings_routes(),
+        extra_routes=_control_plane,
     )
     registry.register(ws_adapter)
     adapters = [ws_adapter]
