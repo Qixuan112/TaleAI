@@ -2,7 +2,7 @@
 
 **反向 WS**：SnowLuma 作为客户端主动连**我们**的 `/qq` 端点（它在
 `wsClients` 里配置我们的地址）。所以这里要起一个 WS 服务端——跟
-WebSocketAdapter 同一套 FastAPI app 也可以是独立的，M0 先独立成自己的
+WebAdapter 同一套 FastAPI app 也可以是独立的，M0 先独立成自己的
 app，main 里按需挂载。
 
 握手带两个头（OneBot 11 规范要求读）：
@@ -28,7 +28,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from core.adapter.base import AdapterBase, Message, Reply
 from core.adapter.pacing import typing_delay
 from core.adapter.qq.protocol import build_send_action, parse_event
-from core.bus.event_bus import EventBus
+from core.event_bus import EventBus
 from core.image_store import MAX_IMAGES_PER_MESSAGE, download as download_image
 
 logger = logging.getLogger(__name__)

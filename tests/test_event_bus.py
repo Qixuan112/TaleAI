@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import pytest
 
-from core.bus.event_bus import Event, EventBus
+from core.event_bus import Event, EventBus
 
 
 @pytest.fixture(autouse=True)
@@ -122,7 +122,7 @@ def test_bad_handler_failure_is_logged(clean_bus, caplog):
         raise RuntimeError("我坏了")
 
     clean_bus.subscribe("evt", bad)
-    with caplog.at_level(logging.ERROR, logger="core.bus.event_bus"):
+    with caplog.at_level(logging.ERROR, logger="core.event_bus"):
         clean_bus.publish("evt")
     assert any("handler" in r.message for r in caplog.records)
 

@@ -21,7 +21,7 @@ from core.adapter import qq as qq_pkg
 from core.adapter.base import Reply
 from core.adapter.qq import adapter as qq_adapter_mod
 from core.adapter.qq.adapter import QQAdapter
-from core.bus.event_bus import EventBus
+from core.event_bus import EventBus
 
 
 @pytest.fixture(autouse=True)
@@ -262,7 +262,7 @@ async def test_split_waits_between_messages_but_not_before_first(monkeypatch):
 
 
 async def test_send_without_connection_is_skipped_not_raised():
-    """没连上就发 → 记日志跳过，不抛（跟 WebSocketAdapter 一致）。"""
+    """没连上就发 → 记日志跳过，不抛（跟 WebAdapter 一致）。"""
     a = QQAdapter()
     await a.send(Reply(session_id="qq:p1", messages=["x"]))  # 不抛即通过
 

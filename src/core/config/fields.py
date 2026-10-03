@@ -105,10 +105,10 @@ _PERSONA_FIELDS = (
 # 否则面板读不到真实配置值。
 _PLATFORM_FIELDS = (
     FieldSpec(
-        key="websocket.enabled", label="启用 WebUI 接入", type="bool", default=True,
+        key="web.enabled", label="启用 WebUI 接入", type="bool", default=True,
     ),
     FieldSpec(
-        key="websocket.port", label="WebUI 端口", type="number", default=8000,
+        key="web.port", label="WebUI 端口", type="number", default=8000,
         help="浏览器聊天页监听的端口",
     ),
     FieldSpec(

@@ -1,4 +1,7 @@
-"""WebSocket 适配器：WebUI 接入（设计文档 §1.6 / §18.1 / §22）。
+"""Web 适配器：WebUI 接入（设计文档 §1.6 / §18.1 / §22）。
+
+「Web」是**平台名**（跟 `qq` 对称）——它走 WebSocket 协议，但平台本身叫 Web/WebUI，
+所以不叫 WebSocketAdapter（那是把协议名当平台名，见 PR 评审）。
 
 用 FastAPI 起服务（文档 §1.6 的 WebUI 演进方向；M0 就一步到位，省得以后迁）。
 本模块只做"接入"这件事：收 WebUI 的原始数据 → 归一成 `Message`；
@@ -29,14 +32,14 @@ from fastapi.responses import RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from core.adapter.base import AdapterBase, Message, Reply
-from core.bus.event_bus import EventBus
+from core.event_bus import EventBus
 from core.image_store import MAX_IMAGES_PER_MESSAGE
 from core.log_stream import LogStream
 
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
 
-# webui/ 在项目根下（src/core/adapter/websocket/ → parents[4]）
+# webui/ 在项目根下（src/core/adapter/web/ → parents[4]）
 WEBUI_DIR = Path(__file__).resolve().parents[4] / "webui"
 
 # 没带 session_id 时的默认会话——裸连（比如直接 ws 客户端测试）也能用
@@ -53,10 +56,10 @@ _ALLOWED_ORIGIN_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]"}
 
 
 
-class WebSocketAdapter(AdapterBase):
-    """WebUI 的 WebSocket 接入。"""
+class WebAdapter(AdapterBase):
+    """WebUI 的接入（走 WebSocket 协议）。"""
 
-    name = "websocket"
+    name = "web"
 
     def __init__(
         self,
@@ -343,7 +346,7 @@ class WebSocketAdapter(AdapterBase):
             self.app, host=self.host, port=self.port, log_level="warning"
         )
         server = uvicorn.Server(config)
-        logger.info("WebSocket 适配器监听 ws://%s:%d/ws", self.host, self.port)
+        logger.info("Web 适配器监听 ws://%s:%d/ws", self.host, self.port)
         await server.serve()
 
     # ---------- 排障辅助 ----------
@@ -352,4 +355,4 @@ class WebSocketAdapter(AdapterBase):
         return list(self._connections)
 
 
-__all__ = ["WebSocketAdapter", "DEFAULT_SESSION_ID"]
+__all__ = ["WebAdapter", "DEFAULT_SESSION_ID"]

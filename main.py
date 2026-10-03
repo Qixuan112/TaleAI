@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 from core.adapter.base import AdapterBase, Message, Reply
 from core.adapter.registry import AdapterRegistry
 from core.adapter.router import Router, UnknownPlatformError
-from core.bus.event_bus import EventBus
+from core.event_bus import EventBus
 from core.llm.chat_llm import ChatLLM
 from core.llm.persona_llm.base import USER_PERSONA_PATH, ensure_user_persona
 from core.log import Logging
@@ -289,7 +289,7 @@ def _resolve_ws_port() -> int:
     from core.config.loader import Config
 
     try:
-        port = Config.load("platforms").get("websocket", {}).get("port")
+        port = Config.load("platforms").get("web", {}).get("port")
         return int(port) if port else 8000
     except Exception:
         return 8000
@@ -315,7 +315,7 @@ def _build(bus: EventBus | None = None):
     store = SessionStore().open()  # 第 3 步：SQLite + WAL + 建表
     PluginRegistry().scan()  # 第 4 步：扫内置 + data/plugin 注册工具
 
-    from core.adapter.websocket.adapter import WebSocketAdapter
+    from core.adapter.web.adapter import WebAdapter
 
     # 实时日志流（§18.2 目录里订阅者为「日志」的那几条）：订阅总线，
     # 供 WebUI 的 /logs 页看「塔利在干什么」。日志镜像 handler 在 _serve 里挂。
@@ -339,7 +339,7 @@ def _build(bus: EventBus | None = None):
         build_settings_routes()(app)
         build_upload_routes()(app)
 
-    ws_adapter = WebSocketAdapter(
+    web_adapter = WebAdapter(
         bus=bus, port=_resolve_ws_port(),
         # 历史帧要同时带 parts（#11 分条往返）与 images（#12 网页显示图），
         # 所以用 history_with_attachments（它一并给了这两样）。文本契约
@@ -348,8 +348,8 @@ def _build(bus: EventBus | None = None):
         clearer=store.clear, stream=stream,
         extra_routes=_control_plane,
     )
-    registry.register(ws_adapter)
-    adapters = [ws_adapter]
+    registry.register(web_adapter)
+    adapters = [web_adapter]
 
     # 第 8 步（续）：QQ（M0-14）。默认关，配置打开才接——Router 自动认识
     if _qq_enabled():

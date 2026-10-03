@@ -16,8 +16,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from fastapi.testclient import TestClient
 
-from core.adapter.websocket.adapter import WebSocketAdapter
-from core.bus.event_bus import EventBus
+from core.adapter.web.adapter import WebAdapter
+from core.event_bus import EventBus
 from core.log_stream import LogStream
 
 
@@ -41,7 +41,7 @@ def _paths(app) -> set[str]:
 
 def test_no_stream_means_no_events_route():
     """裸构造的适配器不该有 /events——大量用例依赖它保持原样。"""
-    a = WebSocketAdapter()
+    a = WebAdapter()
     assert "/events" not in _paths(a.app)
     assert "/logs" not in _paths(a.app)
 
@@ -50,14 +50,14 @@ def test_no_stream_means_no_events_route():
 
 
 def test_stream_adds_events_and_logs_routes():
-    a = WebSocketAdapter(stream=LogStream())
+    a = WebAdapter(stream=LogStream())
     paths = _paths(a.app)
     assert "/events" in paths
     assert "/logs" in paths
 
 
 def test_logs_redirects_to_debug_page():
-    a = WebSocketAdapter(stream=LogStream())
+    a = WebAdapter(stream=LogStream())
     r = TestClient(a.app, follow_redirects=False).get("/logs")
     assert r.status_code in (307, 308)
     assert "logs.html" in r.headers["location"]
@@ -65,7 +65,7 @@ def test_logs_redirects_to_debug_page():
 
 def test_events_serves_published_frames_as_sse():
     """推一帧能经 SSE 读到——证明端点真的接了广播器、且是 event-stream 类型。"""
-    a = WebSocketAdapter(stream=OneShotStream([
+    a = WebAdapter(stream=OneShotStream([
         {"type": "log", "level": "INFO", "logger": "t", "message": "你好"},
     ]))
     r = TestClient(a.app).get("/events")
@@ -79,7 +79,7 @@ def test_chat_ws_still_works_with_stream_injected():
     """/events 与 /logs 不能挡住 /ws——聊天照常。"""
     import asyncio
 
-    a = WebSocketAdapter(stream=LogStream())
+    a = WebAdapter(stream=LogStream())
     with TestClient(a.app).websocket_connect("/ws?session_id=x") as ws:
         ws.send_json({"content": "还在吗"})
         got = asyncio.run(asyncio.wait_for(a.recv(), timeout=1))

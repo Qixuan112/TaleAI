@@ -19,7 +19,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
 
-from core.bus.event_bus import EventBus
+from core.event_bus import EventBus
 
 
 @dataclass
@@ -53,7 +53,7 @@ class Message:
     """
 
     id: str  # 全局唯一消息 ID
-    platform: str  # websocket / qq / wechat
+    platform: str  # web / qq / wechat
     session_id: str  # 稳定会话 ID
     owner: str  # 用户 ID（群聊 = 发言者）；记忆隔离维度
     direction: str  # in / out
@@ -108,7 +108,7 @@ class AdapterBase(ABC):
     所以这一步只是"喊一嗓子"，订阅者（日志/memory 触发）收不收都不影响收消息。
     """
 
-    #: 平台标识，同时用作 AdapterRegistry 的键（websocket / qq / ...）
+    #: 平台标识，同时用作 AdapterRegistry 的键（web / qq / ...）
     name: str = ""
 
     def __init__(self, bus: EventBus | None = None) -> None:

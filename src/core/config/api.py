@@ -1,7 +1,7 @@
 """设置读写 API（UX-05）。
 
 三条路由，挂在 FastAPI app 上（由 main 通过 `extra_routes` 注入，见
-`WebSocketAdapter`）——**适配器不认识 Config**，业务留在这一层，
+`WebAdapter`）——**适配器不认识 Config**，业务留在这一层，
 守住 §22 import 单向：
 
     GET  /api/settings/fields?domain=config   字段定义（面板据此渲染表单）
@@ -89,7 +89,7 @@ def _coerce(raw: Any, spec) -> Any:
 def build_settings_routes(
     config_dir: Path | None = None,
 ) -> Callable[[FastAPI], None]:
-    """造一个路由注册器，交给 WebSocketAdapter 的 `extra_routes`。
+    """造一个路由注册器，交给 WebAdapter 的 `extra_routes`。
 
     config_dir 只在测试里用（指向 tmp），生产不传 = 用默认 data/config/。
     """

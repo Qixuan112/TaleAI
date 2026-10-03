@@ -20,7 +20,7 @@ from core import image_store
 from core.adapter.base import AdapterBase, Message, Reply
 from core.adapter.registry import AdapterRegistry
 from core.adapter.router import Router
-from core.bus.event_bus import EventBus
+from core.event_bus import EventBus
 from core.session.store import SessionStore
 
 # 最小合法 PNG（1x1 透明）——真实字节头，供 sniff 认出来
