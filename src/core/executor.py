@@ -124,6 +124,14 @@ class ToolExecutor:
             # 用 except Exception 会让它们穿出去结束整个进程、或拆掉前台循环
             # （PR #10 已复现：进程被 sys.exit(4) 带走 / CancelledError 冒泡停掉
             # serve_forever）。KeyboardInterrupt 例外：用户 Ctrl-C 该照常退出。
+            #
+            # 这里吞掉**工具自抛**的 CancelledError 是有意的：那是工具代码坏了，
+            # 不是有人要取消我们。**外部取消落不到这里**——handler 是同步调用、
+            # try 内没有任何 await 点，而 CancelledError 只在挂起点交付；外部
+            # （serve_forever / Ctrl-C）的取消会在调用方别的 await 处被正常收到
+            # （评审 rev2，已实跑验证）。将来支持 async 工具（try 内出现 await）
+            # 时重看此处：届时要对"当前任务正在被取消"（task.cancelling() > 0）
+            # 的情况放行。
             if isinstance(e, KeyboardInterrupt):
                 raise
             logger.exception("工具 %r 执行出错", call.name)

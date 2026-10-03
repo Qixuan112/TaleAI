@@ -137,7 +137,12 @@ class WebAdapter(AdapterBase):
         if raw_id.startswith(WEB_SESSION_PREFIX) and raw_id != WEB_SESSION_PREFIX:
             return raw_id
         if raw_id:
-            logger.warning("拒绝非 web: 前缀的会话 id %r，回落默认会话", raw_id)
+            # 落进默认会话是设计行为，但日志要能看出"这条 id 被丢掉了、丢去了哪"
+            # ——否则调试时只见消息混进 web:local、看不出发生了什么（评审 rev2）。
+            logger.warning(
+                "拒绝非 web: 前缀的会话 id %r，消息落入默认会话 %s",
+                raw_id, DEFAULT_SESSION_ID,
+            )
         return DEFAULT_SESSION_ID
 
     def _origin_allowed(self, websocket: WebSocket) -> bool:

@@ -8,6 +8,7 @@
 """
 
 import asyncio
+import logging
 import os
 import sys
 
@@ -176,13 +177,22 @@ def test_missing_origin_is_allowed():
         assert "web:local" in a.connected_sessions()
 
 
-def test_cross_platform_session_id_is_downgraded():
-    """客户端传 cli:/qq: 这类可预测的跨平台 id → 回落默认 web: 会话。"""
+def test_cross_platform_session_id_is_downgraded(caplog):
+    """客户端传 cli:/qq: 这类可预测的跨平台 id → 回落默认 web: 会话。
+
+    回落要留痕：日志同时带被拒的 id 和落入的会话——否则调试时只见消息
+    混进 web:local、看不出 id 被丢掉了（评审 rev2）。
+    """
     a = WebAdapter()
     client = TestClient(a.app)
-    with client.websocket_connect("/ws?session_id=cli:local"):
-        assert "cli:local" not in a.connected_sessions()
-        assert "web:local" in a.connected_sessions()
+    with caplog.at_level(logging.WARNING, logger="core.adapter.web.adapter"):
+        with client.websocket_connect("/ws?session_id=cli:local"):
+            assert "cli:local" not in a.connected_sessions()
+            assert "web:local" in a.connected_sessions()
+    assert any(
+        "cli:local" in r.getMessage() and "web:local" in r.getMessage()
+        for r in caplog.records
+    )
 
 
 def test_owner_is_always_local():

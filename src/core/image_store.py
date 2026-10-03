@@ -107,6 +107,14 @@ def cleanup(base: Path | None = None, *, protect: str | None = None) -> int:
             removed += 1
         except OSError:
             logger.warning("删旧图失败：%s", p, exc_info=True)
+    if total > MAX_DIR_BYTES:
+        # 删完仍超限：protect 的那张本身超过阈值、或文件删不掉。正常路径到不了
+        # （上传上限 5MB ≪ 100MB），绕过上传直接往目录塞大文件才会；留一条痕迹，
+        # 别让回收卡住时无声无息（评审 rev2，行为不变）。
+        logger.warning(
+            "cleanup 后目录仍超限（%.1f MB > %.1f MB），protect=%r 可能过大",
+            total / 1024 / 1024, MAX_DIR_BYTES / 1024 / 1024, protect,
+        )
     return removed
 
 
