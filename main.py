@@ -199,6 +199,30 @@ async def _safe_send(adapter: AdapterBase, reply: Reply) -> None:
         logger.exception("发送回复失败：session=%s", reply.session_id)
 
 
+async def _safe_start(adapter: AdapterBase) -> None:
+    """起一个适配器；起不来只记日志，**不向上抛**。
+
+    为什么不让它抛：这些 start() 是 `asyncio.gather` 的并列分支，任何一个抛
+    异常都会让整个 gather 提前结束——**一个平台端口被占（如 QQ 的 8866 撞了
+    别的进程），连 WebUI 都一起没了**。而"这个平台起不来"和"整个服务该不该
+    活着"是两回事：能起的照常服务，起不来的记一笔，别互相拖垮。
+
+    为什么捕 `BaseException` 而不是 `Exception`：uvicorn 端口绑定失败时走的是
+    `sys.exit(3)` → 抛 **`SystemExit`**，它不继承 `Exception`，`except Exception`
+    根本拦不住（实测踩到）。两种"该停"的信号必须放行、其余一律吞：
+      - `KeyboardInterrupt`（Ctrl-C）——用户要停，必须上抛
+      - `CancelledError`（asyncio 取消）——正常退出信号，必须上抛
+    """
+    name = getattr(adapter, "name", None) or type(adapter).__name__
+    try:
+        await adapter.start()
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        raise
+    except BaseException:
+        # SystemExit / OSError(端口被占) / 其它——都当"这个平台没起来"，不拖垮别的
+        logger.exception("适配器 %r 启动失败，已跳过（其余平台照常服务）", name)
+
+
 async def serve_forever(
     adapters: list[AdapterBase],
     *,
@@ -340,11 +364,12 @@ async def _serve() -> None:
     logger.info("塔利已就绪 → 聊天 http://127.0.0.1:%d/ · 日志 http://127.0.0.1:%d/logs",
                 port, port)
     try:
-        # 第 9 步：把适配器挂成常驻任务，然后前台循环等消息
+        # 第 9 步：把适配器挂成常驻任务，然后前台循环等消息。
+        # 每个 start() 各自兜异常（_safe_start）——某平台端口被占不该拖垮别的平台。
         wake = load_wake_policy()
         logger.info("唤醒策略：范围=%s 关键词=%s", wake.scope, list(wake.words) or "（无）")
         await asyncio.gather(
-            *(a.start() for a in adapters),
+            *(_safe_start(a) for a in adapters),
             serve_forever(adapters, router=router, store=store, bot=bot, bus=bus,
                           wake=wake),
         )
