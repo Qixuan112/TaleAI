@@ -49,9 +49,39 @@ class QQAdapter(AdapterBase):
         self._link: WebSocket | None = None
         # 学来的机器人 QQ 号（X-Self-ID）
         self.bot_id: str = ""
+        # 握手 token（OneBot access_token 约定）。空 = 不校验（单机自用默认）。
+        self.access_token: str = self._load_access_token()
         # 已见过的 message_id（FIFO 淘汰）
         self._seen_ids: OrderedDict[str, None] = OrderedDict()
         self.app = self._build_app()
+
+    @staticmethod
+    def _load_access_token() -> str:
+        """读 platforms.qq.access_token；读配置失败就当作没配（不拦）。
+
+        为什么要 token：反向 WS 谁都能连，任意客户端连上就会把 SnowLuma 顶掉，
+        拿到 bot 的控制权（PR #10）。配了 token 就要求握手带上——单机自用可留空。
+        """
+        try:
+            from core.config.loader import Config
+
+            return str(Config.load("platforms").get("qq", {}).get("access_token", "") or "")
+        except Exception:
+            return ""
+
+    def _token_ok(self, websocket: WebSocket) -> bool:
+        """校验握手 token：查询参数 access_token 或 Authorization: Bearer。
+
+        没配 token（空串）→ 一律放行（保持 M0 默认行为，不破坏现有部署）。
+        """
+        if not self.access_token:
+            return True
+        supplied = websocket.query_params.get("access_token", "")
+        if not supplied:
+            auth = websocket.headers.get("authorization", "")
+            if auth.lower().startswith("bearer "):
+                supplied = auth[7:].strip()
+        return supplied == self.access_token
 
     # ---------- 状态 ----------
 
@@ -139,16 +169,36 @@ class QQAdapter(AdapterBase):
 
         @app.websocket(path)
         async def qq_endpoint(websocket: WebSocket) -> None:
+            # token 校验在 accept 之前：不符就关，不做任何登记（1008 = policy）。
+            if not self._token_ok(websocket):
+                logger.warning("QQ 反向 WS 握手 token 不符，拒绝连接")
+                await websocket.close(code=1008)
+                return
             await websocket.accept()
             # 规范：握手头带机器人 QQ 号和客户端类型
             self.bot_id = websocket.headers.get("x-self-id", "") or self.bot_id
             role = websocket.headers.get("x-client-role", "")
             logger.info("QQ 已连接：bot_id=%s role=%s", self.bot_id, role)
 
+            # 新连接顶上：**主动关闭旧连接**。旧实现只是替换 _link、不关旧的，
+            # 结果旧连接还开着（能收事件），而 _link 指向新的；新连接一断就
+            # 把 _link 置 None，旧连接却被当成"已死"——机器人彻底变哑（PR #10）。
             prev, self._link = self._link, websocket
+            if prev is not None and prev is not websocket:
+                try:
+                    await prev.close(code=1000)  # 让旧连接走它自己的 finally
+                except Exception:
+                    logger.warning("关闭上一个 QQ 连接失败", exc_info=True)
             try:
                 while True:
-                    raw = await websocket.receive_json()
+                    try:
+                        raw = await websocket.receive_json()
+                    except WebSocketDisconnect:
+                        raise
+                    except Exception:
+                        # 单帧坏了只丢这一帧，不拆连接（PR #10）
+                        logger.warning("QQ 收到无法解析的帧，已忽略")
+                        continue
                     self._on_frame(raw)
             except WebSocketDisconnect:
                 pass

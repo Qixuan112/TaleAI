@@ -128,6 +128,61 @@ def test_tag_with_attributes_not_matched():
     assert r.is_fallback is True
 
 
+# ---------- 契约破坏：整段兜底，不截断报成功（PR #10 High）----------
+
+
+def test_body_containing_close_tag_falls_back():
+    """正文里出现 </msg>：旧实现会在第一个 </msg> 处截断并报成功（静默丢内容）。
+
+    契约不允许 <msg> 内出现标签字符；破坏了就整段兜底，别把「这样」丢掉、
+    也别报告成解析成功。
+    """
+    r = parse("<msg>你要写成 <msg>你好</msg> 这样</msg>\n<msg>第二条</msg>")
+    assert r.is_fallback is True
+    assert r.messages == ["<msg>你要写成 <msg>你好</msg> 这样</msg>\n<msg>第二条</msg>"]
+
+
+def test_nested_open_tag_falls_back():
+    """一对 <msg>...</msg> 中间又冒出 <msg>（嵌套）→ 契约破坏 → 整段兜底。"""
+    r = parse("前言 <msg>没闭合\n<msg>真正的回复</msg>")
+    assert r.is_fallback is True
+    assert r.messages == ["前言 <msg>没闭合\n<msg>真正的回复</msg>"]
+
+
+def test_stray_close_tag_falls_back():
+    """多出一个对不上开标签的 </msg> → 契约破坏 → 整段兜底。"""
+    r = parse("<msg>正常</msg></msg>")
+    assert r.is_fallback is True
+    assert r.messages == ["<msg>正常</msg></msg>"]
+
+
+def test_close_tag_in_body_with_trailing_falls_back():
+    """正文含 </msg> 且尾部还有内容：旧实现截断成「用」，这里整段兜底。"""
+    r = parse("<msg>用 </msg> 结束\n\n第二条</msg>")
+    assert r.is_fallback is True
+
+
+def test_internal_blank_line_is_one_message():
+    """一条 <msg> 内部的空行属于同一条消息——不因空行被拆开、也不触发兜底。"""
+    r = parse("<msg>甲</msg>\n\n<msg>乙\n\n丙</msg>")
+    assert r.messages == ["甲", "乙\n\n丙"]
+    assert r.is_fallback is False
+
+
+def test_unclosed_run_is_linear_time():
+    """O(n²) 回归护栏：大量未闭合 <msg> 必须线性完成。
+
+    改前 8000 个未闭合 <msg>（约 40KB）实测 7 秒，同步跑在事件循环上会卡死
+    整个服务。这里给一个宽松的上限（0.1s），只保证"不是二次"。
+    """
+    import time
+
+    text = "<msg>未闭合" * 8000
+    start = time.perf_counter()
+    XmlParser().parse(text)
+    assert time.perf_counter() - start < 0.1
+
+
 # ---------- 纯函数性质 ----------
 
 

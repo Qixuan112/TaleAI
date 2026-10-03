@@ -38,7 +38,7 @@ DEFAULT_SOURCES = {
     # 没配的人不该多起一个端口）。键名与 fields.py 的 platforms 域一致。
     "platforms": {
         "websocket": {"enabled": True, "port": 8000},
-        "qq": {"enabled": False, "host": "127.0.0.1", "port": 8866},
+        "qq": {"enabled": False, "host": "127.0.0.1", "port": 8866, "access_token": ""},
     },
     "plugins": {},
     "secrets": {},

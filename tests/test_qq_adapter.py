@@ -102,6 +102,64 @@ def test_disconnect_clears_connection():
     assert not a.connected()
 
 
+# ---------- 端点鉴权与多连接（PR #10 High） ----------
+
+
+def test_token_mismatch_is_rejected():
+    """配了 access_token 后，token 不符的连接被拒——否则谁都能顶掉 SnowLuma。"""
+    a = QQAdapter()
+    a.access_token = "sekret"
+    with pytest.raises(Exception):  # TestClient 连不上就是被 close 了
+        with TestClient(a.app).websocket_connect("/qq?access_token=wrong"):
+            pass
+    assert a.connected() is False
+
+
+def test_token_via_query_is_accepted():
+    a = QQAdapter()
+    a.access_token = "sekret"
+    with TestClient(a.app).websocket_connect("/qq?access_token=sekret"):
+        assert a.connected() is True
+
+
+def test_token_via_bearer_is_accepted():
+    a = QQAdapter()
+    a.access_token = "sekret"
+    with TestClient(a.app).websocket_connect(
+        "/qq", headers={"Authorization": "Bearer sekret"}
+    ):
+        assert a.connected() is True
+
+
+def test_no_token_configured_means_open():
+    """默认（没配 token）不校验——保持 M0 单机用法不变。"""
+    a = QQAdapter()
+    assert a.access_token == ""
+    with TestClient(a.app).websocket_connect("/qq"):
+        assert a.connected() is True
+
+
+def test_new_connection_supersedes_and_closes_old():
+    """新连接顶上：bot_id 跟随新连接，且旧连接被主动关闭而不是留成哑巴。
+
+    旧实现的 bug：只替换 _link、不关旧的 → 旧连接还开着（能收事件），
+    新连接一断 _link 置 None，旧连接却被当成"当前连接"以外的、来不及回退，
+    机器人彻底变哑（PR #10）。
+    """
+    a = QQAdapter()
+    client = TestClient(a.app)
+    with client.websocket_connect("/qq", headers={"X-Self-ID": "10001"}) as first:
+        assert a.bot_id == "10001"
+        with client.websocket_connect("/qq", headers={"X-Self-ID": "10002"}) as second:
+            # 新连接顶上但没断：仍算连接着，bot_id 已更新
+            assert a.connected() is True
+            assert a.bot_id == "10002"
+        # 第二条断开后：没有残留的活连接挂在 _link 上
+        assert a.connected() is False
+    # 第一条（被服务端主动 close 过）退出时也不该把状态搞乱
+    assert a.connected() is False
+
+
 # ---------- 发：Reply → OneBot 动作 ----------
 
 

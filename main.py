@@ -109,12 +109,23 @@ async def handle_message(
     # 第 4 步：收即存——**先读历史、再落库**。
     # 顺序不能反：装配 = history + 最新提问，若先落库再读，最新提问会同时
     # 躺在 history 末尾和"最新提问"里，重复发一遍。
-    history = store.history(session_id)
+    # with_parts=True：带出 assistant 的分条数组，供 run_loop 精确还原 <msg>
+    # 标签（PR #10：纯文本形态无法往返）。
+    history = store.history(session_id, with_parts=True)
     try:
         store.append(session_id, "user", message.content)
     except Exception:
-        # 用户消息存不下来，这轮干脆不调模型——免得用户以为已经发出去了
+        # 用户消息存不下来，这轮干脆不调模型——免得用户以为已经发出去了。
+        # 但**要回一帧**：否则前端收不到任何东西，永远停在"塔利在想…"
+        # （PR #10 复现）。回一帧 error 让界面解开；仍 return None——
+        # user 行没落库，绝不能补写 assistant 行（否则破坏「1 回合 = 2 行」）。
         logger.exception("用户消息落库失败，跳过本轮")
+        await _safe_send(adapter, Reply(
+            session_id=session_id,
+            messages=["……（这条消息我这边没存下来，你再发一次？）"],
+            tool_calls_made=0,
+            stop_reason="error",
+        ))
         return None
 
     # 第 5~6 步：装配 + FC 循环（装配在 run_loop 内部完成，§18.5 硬规则 6）。
@@ -129,12 +140,13 @@ async def handle_message(
         await _safe_send(adapter, reply)
         return reply
 
-    # 第 7 步：assistant 真实消息落库；tool_json 一并存
+    # 第 7 步：assistant 真实消息落库；tool_json 与分条一并存
     try:
         store.append(
             session_id,
             "assistant",
             "\n\n".join(reply.messages),
+            parts=list(reply.messages),
             tool_json={"calls": reply.tool_calls_made,
                        "stop_reason": reply.stop_reason} if reply.tool_calls_made else None,
         )
@@ -256,7 +268,8 @@ def _build(bus: EventBus | None = None):
     # 用回调而不是把 store 塞给适配器——适配器不该认识 SessionStore（§22 import 单向）。
     # clearer 同理：网页上「清空本次历史」要能删库，但适配器只认「(session_id)->删了几条」。
     ws_adapter = WebSocketAdapter(
-        bus=bus, port=_resolve_ws_port(), history_provider=store.history,
+        bus=bus, port=_resolve_ws_port(),
+        history_provider=lambda sid: store.history(sid, with_parts=True),
         clearer=store.clear, stream=stream,
     )
     registry.register(ws_adapter)
@@ -314,7 +327,7 @@ def _run_cli(once: bool = False) -> None:
     bot = ChatLLM()
 
     store.ensure_session(CLI_SESSION_ID)
-    history: list[dict[str, str]] = store.history(CLI_SESSION_ID)
+    history: list[dict[str, str]] = store.history(CLI_SESSION_ID, with_parts=True)
 
     if history:
         print(f"===== 塔利记得你之前来过（已恢复 {len(history)} 条历史）=====\n")
@@ -344,16 +357,17 @@ def _run_cli(once: bool = False) -> None:
                     CLI_SESSION_ID,
                     "assistant",
                     "\n\n".join(reply.messages),
+                    parts=list(reply.messages),
                     tool_json={"calls": reply.tool_calls_made,
                                "stop_reason": reply.stop_reason} if reply.tool_calls_made else None,
                 )
             except Exception as exc:
                 reply = _close_turn_on_error(store, CLI_SESSION_ID, exc)
                 print(f"\n  〔塔利这次没答上来：{exc}〕")
-                history = store.history(CLI_SESSION_ID)
+                history = store.history(CLI_SESSION_ID, with_parts=True)
                 continue
 
-            history = store.history(CLI_SESSION_ID)
+            history = store.history(CLI_SESSION_ID, with_parts=True)
 
             for message in reply.messages:
                 print(f"\n塔利: {message}")
