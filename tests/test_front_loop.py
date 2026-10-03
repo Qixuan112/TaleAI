@@ -20,7 +20,7 @@ import pytest
 from core.adapter.base import AdapterBase, Message, Reply
 from core.adapter.registry import AdapterRegistry
 from core.adapter.router import Router
-from core.bus.event_bus import EventBus
+from core.event_bus import EventBus
 from core.session.store import SessionStore
 
 
@@ -54,7 +54,7 @@ class FakeBot:
         self.calls: list[tuple] = []
 
     async def run_loop(self, user_question, history=None, session_id="",
-                       *, session_type="", owner=""):
+                       *, session_type="", owner="", images=None):
         self.calls.append((user_question, list(history or []), session_id))
         if self.on_call:
             self.on_call(user_question, history, session_id)
@@ -266,7 +266,12 @@ async def test_unknown_platform_does_not_crash_the_loop(store, clean_bus):
 
 
 async def test_user_write_failure_skips_the_model_call(store, clean_bus, monkeypatch):
-    """user 落库失败：这轮干脆不调模型（免得用户以为发出去了）。"""
+    """user 落库失败：这轮不调模型（免得用户以为发出去了），但**要回一帧**。
+
+    契约修正（PR #10）：旧实现直接 return None，适配器收不到任何帧，WebUI
+    永远停在「塔利在想…」。现在补发一条 error 回复让界面解开；仍返回 None
+    （user 行没落库，不能补写 assistant 行，保住「1 回合 = 2 行」）。
+    """
     import main
 
     adapter = FakeAdapter(bus=clean_bus)
@@ -281,8 +286,10 @@ async def test_user_write_failure_skips_the_model_call(store, clean_bus, monkeyp
     reply = await main.handle_message(
         make_message("你好"), router=Router(reg), store=store, bot=bot, bus=clean_bus,
     )
-    assert reply is None
-    assert bot.calls == []
+    assert reply is None          # 不补 assistant 行，回合不成立
+    assert bot.calls == []        # 没调模型
+    assert len(adapter.sent) == 1  # 但回了一帧，界面不会卡住
+    assert adapter.sent[0].stop_reason == "error"
 
 
 # ---------- serve_forever：把适配器挂起来 ----------
@@ -314,3 +321,88 @@ async def test_serve_forever_processes_one_message_then_stops(store, clean_bus):
         {"role": "assistant", "content": "好呀~"},
     ]
     assert len(adapter.sent) == 1
+
+
+# ---------- _safe_start：一个平台起不来不拖垮别的 ----------
+
+
+async def test_safe_start_swallows_adapter_failure(clean_bus):
+    """适配器 start() 抛异常（如端口被占）→ 只记日志，不向上抛。
+
+    这正是"QQ 的 8866 被占，连 WebUI 一起崩"的那个真问题：这些 start()
+    是 gather 的并列分支，一个抛整个 gather 就倒。
+    """
+    import main
+
+    class BoomAdapter(FakeAdapter):
+        name = "boom"
+
+        async def start(self):
+            raise OSError("[Errno 10048] 端口被占")
+
+    # 不抛即通过
+    await main._safe_start(BoomAdapter(bus=clean_bus))
+
+
+async def test_safe_start_propagates_cancellation(clean_bus):
+    """CancelledError 必须原样上抛——否则 Ctrl-C 停不掉服务。"""
+    import main
+
+    class CancelAdapter(FakeAdapter):
+        async def start(self):
+            raise asyncio.CancelledError()
+
+    with pytest.raises(asyncio.CancelledError):
+        await main._safe_start(CancelAdapter(bus=clean_bus))
+
+
+async def test_one_bad_adapter_does_not_kill_the_rest(store, clean_bus):
+    """真接线：坏适配器 + 好适配器一起 gather，好的那个照常收消息。"""
+    import main
+
+    class BoomAdapter(FakeAdapter):
+        name = "boom"
+
+        async def start(self):
+            raise OSError("端口被占")
+
+    good = FakeAdapter(bus=clean_bus)
+    boom = BoomAdapter(bus=clean_bus)
+    reg = AdapterRegistry()
+    reg.register(good)
+    bot = FakeBot()
+
+    async def run():
+        # 坏适配器先倒，好适配器 + 前台循环继续
+        await main._safe_start(boom)
+        await main.serve_forever([good], router=Router(reg), store=store,
+                                 bot=bot, bus=clean_bus)
+
+    task = asyncio.create_task(run())
+    good._deliver(make_message("还在吗"))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # 坏适配器倒了，好适配器照常走完处理链
+    assert len(good.sent) == 1
+    assert store.history(SID)[-1] == {"role": "assistant", "content": "好呀~"}
+
+
+async def test_safe_start_swallows_systemexit(clean_bus):
+    """uvicorn 端口绑定失败抛的是 SystemExit（不继承 Exception）——也要吞。
+
+    实测踩到：QQ 的 8866 被占 → uvicorn 走 sys.exit(3) → SystemExit 穿透
+    `except Exception` → 整个进程（含 WebUI）一起没。这里钉住它。
+    """
+    import main
+
+    class ExitAdapter(FakeAdapter):
+        name = "exit"
+
+        async def start(self):
+            raise SystemExit(3)
+
+    # 不抛即通过
+    await main._safe_start(ExitAdapter(bus=clean_bus))

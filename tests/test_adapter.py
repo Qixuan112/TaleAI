@@ -3,7 +3,7 @@
 设计文档 §3.7 / §18.1 / §18.3 / §19-4、5 / §22。
 
 这里用**假适配器**（不碰网络）验证骨架：归一、收件箱、路由查表。
-真 WebSocket 收发的验证在 test_websocket_adapter.py。
+真 WebSocket 收发的验证在 test_web_adapter.py。
 """
 
 import asyncio
@@ -17,7 +17,7 @@ import pytest
 from core.adapter.base import AdapterBase, Message, Reply
 from core.adapter.registry import AdapterRegistry
 from core.adapter.router import Router, UnknownPlatformError
-from core.bus.event_bus import EventBus
+from core.event_bus import EventBus
 
 
 # ---------- 假适配器：只实现抽象方法，不碰网络 ----------
@@ -64,7 +64,7 @@ def clean_bus():
 def test_message_has_documented_fields():
     """字段齐全（§18.3）：id/平台/会话/owner/方向/role/正文 + 后四个。"""
     m = Message(
-        id="m1", platform="websocket", session_id="web:local", owner="local",
+        id="m1", platform="web", session_id="web:local", owner="local",
         direction="in", role="user", content="你好",
     )
     assert m.mentions == []  # M0 空列表占位（方案 B）
@@ -153,9 +153,9 @@ def test_adapter_base_cannot_be_instantiated_directly():
 
 def test_registry_register_and_lookup():
     reg = AdapterRegistry()
-    a = FakeAdapter(name="websocket")
+    a = FakeAdapter(name="web")
     reg.register(a)
-    assert reg.lookup("websocket") is a
+    assert reg.lookup("web") is a
 
 
 def test_registry_lookup_unknown_returns_none():
@@ -188,7 +188,7 @@ def test_registry_reset_clears():
 
 def test_router_routes_to_matching_platform():
     reg = AdapterRegistry()
-    a = FakeAdapter(name="websocket")
+    a = FakeAdapter(name="web")
     reg.register(a)
     router = Router(reg)
     msg = a.normalize({"content": "hi"})
@@ -206,7 +206,7 @@ def test_router_unknown_platform_raises_not_guesses():
 
 def test_router_picks_the_right_one_among_many():
     reg = AdapterRegistry()
-    ws = FakeAdapter(name="websocket")
+    ws = FakeAdapter(name="web")
     qq = FakeAdapter(name="qq")
     reg.register(ws)
     reg.register(qq)

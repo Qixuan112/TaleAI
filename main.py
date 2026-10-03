@@ -22,13 +22,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 from core.adapter.base import AdapterBase, Message, Reply
 from core.adapter.registry import AdapterRegistry
 from core.adapter.router import Router, UnknownPlatformError
-from core.bus.event_bus import EventBus
+from core.event_bus import EventBus
 from core.llm.chat_llm import ChatLLM
 from core.llm.persona_llm.base import USER_PERSONA_PATH, ensure_user_persona
 from core.log import Logging
 from core.log_stream import LogStream, StreamLogHandler
 from core.plugin.registry import PluginRegistry
 from core.session.store import SessionStore
+from core.wake import WakePolicy, load_wake_policy
 
 logger = logging.getLogger(__name__)
 
@@ -75,10 +76,11 @@ async def handle_message(
     store: SessionStore,
     bot,
     bus: EventBus,
+    wake: "WakePolicy | None" = None,
 ) -> Reply | None:
     """处理一条入站消息：§18.1 第 3~9 步。
 
-    返回发给用户的 Reply；被忽略（空白/平台不认识/落库失败）时返回 None。
+    返回发给用户的 Reply；被忽略（空白/平台不认识/未唤醒/落库失败）时返回 None。
 
     为什么是 async：第 6 步要 `await` 模型调用。它必须 await `run_loop()`
     而不是调同步的 `chat()`——后者内部 `asyncio.run()`，在已在跑的事件循环里
@@ -86,8 +88,36 @@ async def handle_message(
     """
     session_id = message.session_id
 
-    # 空白消息：不发请求、不落库（跟 CLI 的空行一致，省一次无意义调用）
-    if not message.content.strip():
+    # 空白消息：不发请求、不落库（跟 CLI 的空行一致，省一次无意义调用）。
+    # 例外：带图的消息即使没文字也算"有内容"——纯图片是合法输入（UX-06），
+    # 模型看图不需要配文。
+    if not message.content.strip() and not message.images:
+        return None
+
+    # 唤醒门（§UX-03）：群里没叫它 → 存进历史但不回。
+    #
+    # 位置讲究：放在空白守卫之后、路由之前。理由——
+    # ① 在空白之后再判，空消息不会先落库（空白消息本就不该进历史）；
+    # ② 在路由之前判，未唤醒消息不发请求、不读历史、不建"回合"；
+    # ③ 但**仍要落库**（用户定："存进历史但不回"）——保住记忆原始素材。
+    # 门本身是纯代码（core/wake.py），不经过模型：让模型自己判断"叫没叫我"
+    # 等于把确定性的事交给不确定的 LLM（§十二 定论）。
+    policy = wake if wake is not None else load_wake_policy()
+    if policy.gates(message.session_type) and not policy.is_woken(
+        message.content, message.addressed
+    ):
+        try:
+            store.ensure_session(
+                session_id, platform=message.platform, owner=message.owner,
+                kind=message.session_type or "private",
+            )
+            # 图也要落库——未唤醒的群消息同样可能带图（纯图消息更是只有图），
+            # 漏了 attachments 会让这些图在历史里凭空消失。
+            store.append(session_id, "user", message.content,
+                         attachments=list(message.images or []) or None)
+        except Exception:
+            logger.exception("未唤醒消息落库失败，跳过")
+        logger.debug("群聊未唤醒，已存库但不回：session=%s", session_id)
         return None
 
     # 第 3 步：Router 定位会话。M0 只是一个"内循环"查表——确认平台认识，
@@ -109,32 +139,47 @@ async def handle_message(
     # 第 4 步：收即存——**先读历史、再落库**。
     # 顺序不能反：装配 = history + 最新提问，若先落库再读，最新提问会同时
     # 躺在 history 末尾和"最新提问"里，重复发一遍。
-    history = store.history(session_id)
+    # with_parts=True：带出 assistant 的分条数组，供 run_loop 精确还原 <msg>
+    # 标签（PR #10：纯文本形态无法往返）。
+    history = store.history(session_id, with_parts=True)
     try:
-        store.append(session_id, "user", message.content)
+        store.append(session_id, "user", message.content,
+                     attachments=list(message.images or []) or None)
     except Exception:
-        # 用户消息存不下来，这轮干脆不调模型——免得用户以为已经发出去了
+        # 用户消息存不下来，这轮干脆不调模型——免得用户以为已经发出去了。
+        # 但**要回一帧**：否则前端收不到任何东西，永远停在"塔利在想…"
+        # （PR #10 复现）。回一帧 error 让界面解开；仍 return None——
+        # user 行没落库，绝不能补写 assistant 行（否则破坏「1 回合 = 2 行」）。
         logger.exception("用户消息落库失败，跳过本轮")
+        await _safe_send(adapter, Reply(
+            session_id=session_id,
+            messages=["……（这条消息我这边没存下来，你再发一次？）"],
+            tool_calls_made=0,
+            stop_reason="error",
+        ))
         return None
 
     # 第 5~6 步：装配 + FC 循环（装配在 run_loop 内部完成，§18.5 硬规则 6）。
     # 会话类型/owner 一路带给装配——模型据此知道自己在群聊还是私聊（§十二）
+    # images（UX-06）：这条消息带的图，只作用于最新提问，不回流历史。
     try:
         reply = await bot.run_loop(
             message.content, history, session_id,
             session_type=message.session_type, owner=message.owner,
+            images=list(message.images or []),
         )
     except Exception as exc:
         reply = _close_turn_on_error(store, session_id, exc)
         await _safe_send(adapter, reply)
         return reply
 
-    # 第 7 步：assistant 真实消息落库；tool_json 一并存
+    # 第 7 步：assistant 真实消息落库；tool_json 与分条一并存
     try:
         store.append(
             session_id,
             "assistant",
             "\n\n".join(reply.messages),
+            parts=list(reply.messages),
             tool_json={"calls": reply.tool_calls_made,
                        "stop_reason": reply.stop_reason} if reply.tool_calls_made else None,
         )
@@ -169,6 +214,30 @@ async def _safe_send(adapter: AdapterBase, reply: Reply) -> None:
         logger.exception("发送回复失败：session=%s", reply.session_id)
 
 
+async def _safe_start(adapter: AdapterBase) -> None:
+    """起一个适配器；起不来只记日志，**不向上抛**。
+
+    为什么不让它抛：这些 start() 是 `asyncio.gather` 的并列分支，任何一个抛
+    异常都会让整个 gather 提前结束——**一个平台端口被占（如 QQ 的 8866 撞了
+    别的进程），连 WebUI 都一起没了**。而"这个平台起不来"和"整个服务该不该
+    活着"是两回事：能起的照常服务，起不来的记一笔，别互相拖垮。
+
+    为什么捕 `BaseException` 而不是 `Exception`：uvicorn 端口绑定失败时走的是
+    `sys.exit(3)` → 抛 **`SystemExit`**，它不继承 `Exception`，`except Exception`
+    根本拦不住（实测踩到）。两种"该停"的信号必须放行、其余一律吞：
+      - `KeyboardInterrupt`（Ctrl-C）——用户要停，必须上抛
+      - `CancelledError`（asyncio 取消）——正常退出信号，必须上抛
+    """
+    name = getattr(adapter, "name", None) or type(adapter).__name__
+    try:
+        await adapter.start()
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        raise
+    except BaseException:
+        # SystemExit / OSError(端口被占) / 其它——都当"这个平台没起来"，不拖垮别的
+        logger.exception("适配器 %r 启动失败，已跳过（其余平台照常服务）", name)
+
+
 async def serve_forever(
     adapters: list[AdapterBase],
     *,
@@ -176,11 +245,15 @@ async def serve_forever(
     store: SessionStore,
     bot,
     bus: EventBus,
+    wake: "WakePolicy | None" = None,
 ) -> None:
     """常驻前台循环：每个适配器一个 recv 协程（§18.5「每平台 1 个 recv 协程」）。
 
     取消（Ctrl-C / 进程退出）时整体停下并向上抛 CancelledError。
     """
+    # 唤醒策略启动时读一次（§19-13：配置改动重启生效，不做热加载）。
+    # 传 None 时 handle_message 会自己按消息读——测试/裸调用能走，但服务里用的是这份。
+    policy = wake if wake is not None else load_wake_policy()
 
     async def pump(adapter: AdapterBase) -> None:
         while True:
@@ -189,7 +262,8 @@ async def serve_forever(
             # 这里再兜一层，保证单条消息的意外绝不终止整个前台循环。
             try:
                 await handle_message(
-                    message, router=router, store=store, bot=bot, bus=bus
+                    message, router=router, store=store, bot=bot, bus=bus,
+                    wake=policy,
                 )
             except Exception:
                 logger.exception("处理消息时发生未预期的错误，已跳过这条")
@@ -215,7 +289,7 @@ def _resolve_ws_port() -> int:
     from core.config.loader import Config
 
     try:
-        port = Config.load("platforms").get("websocket", {}).get("port")
+        port = Config.load("platforms").get("web", {}).get("port")
         return int(port) if port else 8000
     except Exception:
         return 8000
@@ -241,7 +315,7 @@ def _build(bus: EventBus | None = None):
     store = SessionStore().open()  # 第 3 步：SQLite + WAL + 建表
     PluginRegistry().scan()  # 第 4 步：扫内置 + data/plugin 注册工具
 
-    from core.adapter.websocket.adapter import WebSocketAdapter
+    from core.adapter.web.adapter import WebAdapter
 
     # 实时日志流（§18.2 目录里订阅者为「日志」的那几条）：订阅总线，
     # 供 WebUI 的 /logs 页看「塔利在干什么」。日志镜像 handler 在 _serve 里挂。
@@ -255,12 +329,27 @@ def _build(bus: EventBus | None = None):
     # 注入读历史的回调：连上时补发历史，否则刷新页面后是空的（M0 验收⑤）。
     # 用回调而不是把 store 塞给适配器——适配器不该认识 SessionStore（§22 import 单向）。
     # clearer 同理：网页上「清空本次历史」要能删库，但适配器只认「(session_id)->删了几条」。
-    ws_adapter = WebSocketAdapter(
-        bus=bus, port=_resolve_ws_port(), history_provider=store.history,
+    # extra_routes 同理：设置读写要碰 Config，但适配器不该认识它——main 把
+    # 「注册 /api/* 的业务路由」这件事当回调递进去（UX-01 的注入缝）。
+    # 设置读写（UX-05）+ 图片上传（UX-07）各造一个注册器，串起来一起挂。
+    from core.config.api import build_settings_routes
+    from core.image_api import build_upload_routes
+
+    def _control_plane(app) -> None:
+        build_settings_routes()(app)
+        build_upload_routes()(app)
+
+    web_adapter = WebAdapter(
+        bus=bus, port=_resolve_ws_port(),
+        # 历史帧要同时带 parts（#11 分条往返）与 images（#12 网页显示图），
+        # 所以用 history_with_attachments（它一并给了这两样）。文本契约
+        # history() 不变——那是喂模型的，两者别混。
+        history_provider=store.history_with_attachments,
         clearer=store.clear, stream=stream,
+        extra_routes=_control_plane,
     )
-    registry.register(ws_adapter)
-    adapters = [ws_adapter]
+    registry.register(web_adapter)
+    adapters = [web_adapter]
 
     # 第 8 步（续）：QQ（M0-14）。默认关，配置打开才接——Router 自动认识
     if _qq_enabled():
@@ -291,10 +380,14 @@ async def _serve() -> None:
     logger.info("塔利已就绪 → 聊天 http://127.0.0.1:%d/ · 日志 http://127.0.0.1:%d/logs",
                 port, port)
     try:
-        # 第 9 步：把适配器挂成常驻任务，然后前台循环等消息
+        # 第 9 步：把适配器挂成常驻任务，然后前台循环等消息。
+        # 每个 start() 各自兜异常（_safe_start）——某平台端口被占不该拖垮别的平台。
+        wake = load_wake_policy()
+        logger.info("唤醒策略：范围=%s 关键词=%s", wake.scope, list(wake.words) or "（无）")
         await asyncio.gather(
-            *(a.start() for a in adapters),
-            serve_forever(adapters, router=router, store=store, bot=bot, bus=bus),
+            *(_safe_start(a) for a in adapters),
+            serve_forever(adapters, router=router, store=store, bot=bot, bus=bus,
+                          wake=wake),
         )
     finally:
         root.removeHandler(mirror)
@@ -314,7 +407,7 @@ def _run_cli(once: bool = False) -> None:
     bot = ChatLLM()
 
     store.ensure_session(CLI_SESSION_ID)
-    history: list[dict[str, str]] = store.history(CLI_SESSION_ID)
+    history: list[dict[str, str]] = store.history(CLI_SESSION_ID, with_parts=True)
 
     if history:
         print(f"===== 塔利记得你之前来过（已恢复 {len(history)} 条历史）=====\n")
@@ -344,16 +437,17 @@ def _run_cli(once: bool = False) -> None:
                     CLI_SESSION_ID,
                     "assistant",
                     "\n\n".join(reply.messages),
+                    parts=list(reply.messages),
                     tool_json={"calls": reply.tool_calls_made,
                                "stop_reason": reply.stop_reason} if reply.tool_calls_made else None,
                 )
             except Exception as exc:
                 reply = _close_turn_on_error(store, CLI_SESSION_ID, exc)
                 print(f"\n  〔塔利这次没答上来：{exc}〕")
-                history = store.history(CLI_SESSION_ID)
+                history = store.history(CLI_SESSION_ID, with_parts=True)
                 continue
 
-            history = store.history(CLI_SESSION_ID)
+            history = store.history(CLI_SESSION_ID, with_parts=True)
 
             for message in reply.messages:
                 print(f"\n塔利: {message}")

@@ -39,7 +39,7 @@ def make_bot():
 
 def test_message_has_session_type_defaulting_private():
     """默认 private——WebUI 是 1:1 会话，不写就是私聊。"""
-    m = Message(id="1", platform="websocket", session_id="web:x", owner="local",
+    m = Message(id="1", platform="web", session_id="web:x", owner="local",
                 direction="in", role="user", content="hi")
     assert m.session_type == "private"
 
@@ -111,7 +111,7 @@ def test_group_message_records_kind_group(tmp_path):
     from core.adapter.base import AdapterBase, Reply
     from core.adapter.registry import AdapterRegistry
     from core.adapter.router import Router
-    from core.bus.event_bus import EventBus
+    from core.event_bus import EventBus
 
     class FakeAdapter(AdapterBase):
         name = "qq"
@@ -152,7 +152,7 @@ def test_private_message_records_kind_private(tmp_path):
     from core.adapter.base import AdapterBase, Reply
     from core.adapter.registry import AdapterRegistry
     from core.adapter.router import Router
-    from core.bus.event_bus import EventBus
+    from core.event_bus import EventBus
 
     class FakeAdapter(AdapterBase):
         name = "qq"

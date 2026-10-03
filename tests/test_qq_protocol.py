@@ -139,6 +139,54 @@ def test_string_format_plain_text_untouched():
     assert m.content == "就是普通一句话"
 
 
+# ---------- 图片 URL 提取（UX-08）----------
+
+
+def test_array_image_segment_url_extracted():
+    m = parse_event(private_event(message=[
+        {"type": "text", "data": {"text": "看图"}},
+        {"type": "image", "data": {"url": "https://x/a.png"}},
+    ]))
+    assert m.meta["image_urls"] == ["https://x/a.png"]
+    assert m.content == "看图"   # 图片不进正文
+
+
+def test_array_image_file_as_url_fallback():
+    """有些实现把 URL 放 data.file 里。"""
+    m = parse_event(private_event(message=[
+        {"type": "image", "data": {"file": "https://x/b.jpg"}},
+    ]))
+    assert m.meta["image_urls"] == ["https://x/b.jpg"]
+
+
+def test_array_image_without_url_is_ignored():
+    m = parse_event(private_event(message=[
+        {"type": "image", "data": {"file": "local.jpg"}},   # 不是 http
+    ]))
+    assert m.meta["image_urls"] == []
+
+
+def test_string_cq_image_url_extracted():
+    m = parse_event(private_event(
+        message="[CQ:image,file=x.jpg,url=https://x/c.png] 看看"))
+    assert m.meta["image_urls"] == ["https://x/c.png"]
+    assert "[CQ:" not in m.content
+
+
+def test_no_images_gives_empty_list():
+    m = parse_event(private_event(message="纯文字"))
+    assert m.meta["image_urls"] == []
+
+
+def test_pure_image_message_has_image_but_no_text():
+    """纯图片消息：正文空，但 image_urls 有值（不该被当成空消息丢掉）。"""
+    m = parse_event(private_event(message=[
+        {"type": "image", "data": {"url": "https://x/only.png"}},
+    ]))
+    assert m.content == ""
+    assert m.meta["image_urls"] == ["https://x/only.png"]
+
+
 # ---------- 提及（@） ----------
 
 

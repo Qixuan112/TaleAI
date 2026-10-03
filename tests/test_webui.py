@@ -18,8 +18,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 import pytest
 from fastapi.testclient import TestClient
 
-from core.adapter.websocket.adapter import WEBUI_DIR, WebSocketAdapter
-from core.bus.event_bus import EventBus
+from core.adapter.web.adapter import WEBUI_DIR, WebAdapter
+from core.event_bus import EventBus
 
 
 @pytest.fixture(autouse=True)
@@ -45,7 +45,7 @@ def test_index_html_exists():
 
 
 def test_root_redirects_to_the_page():
-    a = WebSocketAdapter()
+    a = WebAdapter()
     client = TestClient(a.app, follow_redirects=False)
     r = client.get("/")
     assert r.status_code in (307, 308)
@@ -53,7 +53,7 @@ def test_root_redirects_to_the_page():
 
 
 def test_page_is_served():
-    a = WebSocketAdapter()
+    a = WebAdapter()
     r = TestClient(a.app).get("/static/index.html")
     assert r.status_code == 200
     assert "text/html" in r.headers["content-type"]
@@ -63,7 +63,7 @@ def test_page_serving_does_not_break_ws():
     """加了静态页之后 /ws 仍要能用——两条路互不干扰。"""
     import asyncio
 
-    a = WebSocketAdapter()
+    a = WebAdapter()
     with TestClient(a.app).websocket_connect("/ws?session_id=x") as ws:
         ws.send_json({"content": "还在吗"})
         got = asyncio.run(asyncio.wait_for(a.recv(), timeout=1))
@@ -155,6 +155,20 @@ def test_page_clear_is_two_press_confirmed(page):
     assert re.search(r'action\s*:\s*"clear"', page)
 
 
+def test_page_renders_history_parts_as_separate_bubbles(page):
+    """历史帧按分条（parts）渲染成多个气泡——否则刷新后多段回复合成一个。
+
+    服务端 history 帧的每条 assistant 带 parts 数组时，前端要逐条 addBubble；
+    没有 parts 的行（user / 旧行）回落单气泡。
+    """
+    assert re.search(r"\.parts\b", page), "历史渲染没有引用 parts"
+    assert re.search(r"parts\s*\.\s*forEach", page), "没有按 parts 逐条渲染"
+    # 回落分支仍在（旧行优雅降级）
+    assert "addBubble(m.content" in page or re.search(r"addBubble\(m\.content", page)
+    # 仍是 textContent（XSS 纪律不破）
+    assert "textContent" in page
+
+
 # ---------- 日志调试页 logs.html（SSE 实时日志） ----------
 
 
@@ -170,7 +184,7 @@ def test_logs_page_exists():
 
 
 def test_logs_page_served():
-    a = WebSocketAdapter()
+    a = WebAdapter()
     r = TestClient(a.app).get("/static/logs.html")
     assert r.status_code == 200
     assert "text/html" in r.headers["content-type"]

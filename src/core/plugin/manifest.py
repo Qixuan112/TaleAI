@@ -48,10 +48,19 @@ class Manifest:
             raise ManifestError(f"缺少 {MANIFEST_NAME}: {manifest_path}")
 
         try:
-            # encoding 显式 utf-8：中文 Windows 默认 gbk，描述里写中文会读坏
-            raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+            # encoding 用 utf-8-sig：Windows 记事本默认给 UTF-8 文件加 BOM，
+            # 普通 utf-8 读会因 BOM 抛 JSONDecodeError（PR #10 复现合法 manifest
+            # 被当坏 JSON 静默跳过）。utf-8-sig 自动吞掉 BOM，无 BOM 也照读。
+            raw = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
         except json.JSONDecodeError as e:
             raise ManifestError(f"{MANIFEST_NAME} 不是合法 JSON: {e}") from e
+        except UnicodeDecodeError as e:
+            # GBK 等非 UTF-8 编码（中文 Windows 手写常见）——不该让
+            # UnicodeDecodeError 穿透，否则整个 scan/启动挂掉（PR #10）。
+            raise ManifestError(f"{MANIFEST_NAME} 编码不是 UTF-8: {e}") from e
+        except OSError as e:
+            # 权限 000、文件被占用等——同样包成可读错误，扫描跳过这个插件即可
+            raise ManifestError(f"{MANIFEST_NAME} 读取失败: {e}") from e
 
         if not isinstance(raw, dict):
             raise ManifestError(f"{MANIFEST_NAME} 顶层必须是对象，实际是 {type(raw).__name__}")

@@ -19,7 +19,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
 
-from core.bus.event_bus import EventBus
+from core.event_bus import EventBus
 
 
 @dataclass
@@ -53,7 +53,7 @@ class Message:
     """
 
     id: str  # 全局唯一消息 ID
-    platform: str  # websocket / qq / wechat
+    platform: str  # web / qq / wechat
     session_id: str  # 稳定会话 ID
     owner: str  # 用户 ID（群聊 = 发言者）；记忆隔离维度
     direction: str  # in / out
@@ -70,6 +70,24 @@ class Message:
     # （群里有别人在场，说话方式不同）。适配器在 normalize 时就最清楚这一点，
     # 让它顺手带上来，比事后从 session_id 前缀反推可靠（反推是猜，§19-5 精神）。
     session_type: str = "private"
+    # "这条消息是不是直接冲着塔利来的"——适配器给的**平台事实**、不是判断。
+    #
+    # 为什么由适配器给：判断"有没有 @"需要 bot_id（从握手学来的），这是平台知识，
+    # 只有适配器懂。唤醒的**策略**（什么范围生效、什么算叫它）不在这里——那是
+    # 跨平台配置，放 core/wake.py，由 handle_message 汇合两者做决定。
+    # 取值：True=确认在叫我（如 QQ 群被 @）；None=适配器没判定，网关按关键词判。
+    #
+    # ⚠️ 对 §18.3 的补充（基线 Message 没有这个字段），同 session_type 的理由。
+    addressed: bool | None = None
+    # 这条消息带的图片（文件名列表，UX-06）。空 = 纯文本消息。
+    #
+    # ⚠️ 对 §18.3 的补充（基线 Message 没有这个字段）：多模态输入的载体。
+    # 为什么存**文件名**而不是内容/base64：图片本体在 data/temp/img/（可回收，
+    # 超 100MB 删最早），库里/SQLite 里只留引用——两者生命周期不同，不混存。
+    #
+    # 硬规则：**只有最后一条**带图才生效（ChatLLM 只把最新提问发成 content 数组）。
+    # 历史里的图是"数据"，不是"指令"——不回流喂模型（UX-07）。
+    images: list[str] = field(default_factory=list)
 
 
 class AdapterBase(ABC):
@@ -90,7 +108,7 @@ class AdapterBase(ABC):
     所以这一步只是"喊一嗓子"，订阅者（日志/memory 触发）收不收都不影响收消息。
     """
 
-    #: 平台标识，同时用作 AdapterRegistry 的键（websocket / qq / ...）
+    #: 平台标识，同时用作 AdapterRegistry 的键（web / qq / ...）
     name: str = ""
 
     def __init__(self, bus: EventBus | None = None) -> None:

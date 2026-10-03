@@ -53,6 +53,21 @@ class PluginRecord:
     module_name: str  # 记下来，卸载时从 sys.modules 摘掉
 
 
+class _LoadToken:
+    """插件加载上下文的令牌。
+
+    为什么用对象而不是裸字符串：注册归属靠"当前正在加载谁"，若用可变字符串，
+    插件代码可以 `registry._loading = "ping"` 把工具伪装成别的插件的——卸载时
+    就撤销不干净（PR #10）。令牌是私有类实例，插件要伪造得先拿到这个类，
+    门槛高得多。注意这仍是**信任模型不是沙箱**（同 guard.py 的声明）。
+    """
+
+    __slots__ = ("name",)
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+
 class PluginRegistry:
     """内置 + 外部统一注册表。单例（§22）。
 
@@ -67,10 +82,34 @@ class PluginRegistry:
             instance = super().__new__(cls)
             instance._tools: dict[str, ToolSpec] = {}
             instance._plugins: dict[str, PluginRecord] = {}
-            # 正在加载的插件名。装饰器靠它给注册打归属，卸载才能撤销干净。
-            instance._loading: str | None = None
+            # 正在加载的插件令牌（见 _LoadToken）。装饰器靠它给注册打归属，
+            # 卸载才能撤销干净。None = 当前不在插件加载上下文里。
+            instance._loading: _LoadToken | None = None
+            # 启停覆盖：{插件名: bool}。不在表里就按来源取默认（内置启用/外部停用）。
+            # 放在注册表而不是守卫里：工具表过滤（tool_schemas）和执行前硬拦
+            # （守卫）都要看"哪些插件是启用的"，只有一处真相才不会两边打架。
+            instance._enabled_override: dict[str, bool] = {}
             cls._instance = instance
         return cls._instance
+
+    # ---------- 启停 ----------
+
+    def enable(self, plugin_name: str) -> None:
+        """启用插件（权限仍需另外授予——启停与授权是两件事）。"""
+        self._enabled_override[plugin_name] = True
+
+    def disable(self, plugin_name: str) -> None:
+        """停用插件：它的所有工具立即不进工具表、也不可调用。"""
+        self._enabled_override[plugin_name] = False
+
+    def plugin_enabled(self, plugin_name: str) -> bool:
+        """内置默认启用、外部默认停用（§19-11）；显式覆盖优先。"""
+        if plugin_name in self._enabled_override:
+            return self._enabled_override[plugin_name]
+        record = self._plugins.get(plugin_name)
+        if record is None:
+            return False  # 插件都没加载，谈不上启用
+        return record.source == "builtin"
 
     # ---------- 注册 ----------
 
@@ -97,12 +136,12 @@ class PluginRegistry:
         if existing is not None:
             logger.warning(
                 "工具名冲突：%r 已由插件 %r 注册，%r 的注册被跳过",
-                name, existing.plugin, self._loading,
+                name, existing.plugin, self._loading.name,
             )
             return False
 
         self._tools[name] = ToolSpec(
-            name=name, schema=schema or {}, handler=handler, plugin=self._loading
+            name=name, schema=schema or {}, handler=handler, plugin=self._loading.name
         )
         return True
 
@@ -120,23 +159,36 @@ class PluginRegistry:
         for tool_name in [n for n, t in self._tools.items() if t.plugin == plugin_name]:
             del self._tools[tool_name]
 
+        # 启停覆盖也一并清掉，避免插件重装后继承上一个残留的开关
+        self._enabled_override.pop(plugin_name, None)
         sys.modules.pop(record.module_name, None)
         return True
 
     # ---------- 查询 ----------
 
-    def tool_schemas(self) -> list[dict]:
+    def tool_schemas(self, *, enabled_only: bool = True) -> list[dict]:
         """汇总成原生 FC 的工具表（§五：工具 schema 即上下文）。
 
         顺序 = 扫描顺序（内置在前，各自按目录名排序），是确定的。
+
+        enabled_only=True（默认）：**只导出已启用插件的工具**。未启用插件的
+        工具不进模型工具表——否则模型会看到一个它调不动（会被守卫拦）的工具，
+        白占上下文，且重复的工具名会让整个请求非法（PR #10）。判定见
+        plugin_enabled（内置默认启用 / 外部默认停用）。传 False 可拿全量（排障用）。
+
+        名字只认**注册名**，丢掉 schema 里的 `name` 字段：注册表以注册名为准
+        （冲突判定、卸载反查都用它），schema 里再写一个 name 会把它盖掉，
+        外部插件就能用诱导性的 schema.name 顶替内置工具名（PR #10）。
         """
-        return [
-            {
-                "type": "function",
-                "function": {"name": t.name, **t.schema},
-            }
-            for t in self._tools.values()
-        ]
+        schemas: list[dict] = []
+        for t in self._tools.values():
+            if enabled_only and not self.plugin_enabled(t.plugin):
+                continue
+            # schema 里除 name 外的字段照带（description / parameters）；name
+            # 一律用注册名，schema 自己的 name 丢弃。
+            rest = {k: v for k, v in t.schema.items() if k != "name"}
+            schemas.append({"type": "function", "function": {"name": t.name, **rest}})
+        return schemas
 
     def tools(self) -> dict[str, ToolSpec]:
         """工具名 → ToolSpec（执行器用，M0-07 接入）。"""
@@ -206,7 +258,12 @@ class PluginRegistry:
             c if c.isalnum() or c == "_" else "_" for c in manifest.name
         )
 
-        self._loading = manifest.name
+        # 加载前拍一张工具表快照：失败时要回到"这个插件没来过"的状态。
+        # 为什么用快照而不是"删掉 plugin==name 的工具"——插件代码能篡改
+        # registry（它就在同进程里），把已注册的别的工具删掉、或把自己的工具
+        # 挂到别的 plugin 名下；快照回滚能把这类改动一并抹平（PR #10）。
+        snapshot = dict(self._tools)
+        self._loading = _LoadToken(manifest.name)
         try:
             spec = importlib.util.spec_from_file_location(module_name, main_py)
             if spec is None or spec.loader is None:
@@ -214,15 +271,18 @@ class PluginRegistry:
             module = importlib.util.module_from_spec(spec)
             sys.modules[module_name] = module
             spec.loader.exec_module(module)
-        except Exception:
-            # 插件代码是外来的，坏了只跳过，不能让启动挂掉
+        except BaseException as e:
+            # 插件代码是外来的，坏了只跳过，不能让启动挂掉。
+            # 捕 BaseException 而不是 Exception：插件顶层 `sys.exit()` 抛的
+            # SystemExit、或协程里的 CancelledError，都不是 Exception 子类，
+            # 用 except Exception 会让它们穿过去结束整个进程 / 拆掉前台循环
+            # （PR #10 已复现进程被 sys.exit 带走）。
+            # 唯一例外是 KeyboardInterrupt——用户主动 Ctrl-C 该照常退出。
+            if isinstance(e, KeyboardInterrupt):
+                raise
             logger.exception("插件 %r 加载失败，已跳过", manifest.name)
             sys.modules.pop(module_name, None)
-            # 清掉它加载途中已经注册的工具，别留半拉的
-            for tool_name in [
-                n for n, t in self._tools.items() if t.plugin == manifest.name
-            ]:
-                del self._tools[tool_name]
+            self._tools = snapshot  # 回到加载前的工具表，不留半拉状态
             return None
         finally:
             self._loading = None
@@ -240,6 +300,7 @@ class PluginRegistry:
             self.unregister(name)
         self._tools.clear()
         self._plugins.clear()
+        self._enabled_override.clear()
         self._loading = None
 
 

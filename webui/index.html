@@ -46,6 +46,25 @@
   header .status.off::before { content: "● "; color: #d98b8b; }
   header .spacer { flex: 1; }
 
+  /* ---- 顶部导航：聊天 / 设置 / 日志（当前页高亮）---- */
+  .nav {
+    display: flex;
+    gap: 2px;
+    padding: 0 14px;
+    border-bottom: 1px solid var(--line);
+    background: var(--panel);
+  }
+  .nav a {
+    padding: 8px 12px;
+    font-size: 13px;
+    color: var(--muted);
+    text-decoration: none;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+  }
+  .nav a:hover { color: var(--ink); }
+  .nav a.active { color: var(--tale); border-bottom-color: var(--tale); font-weight: 600; }
+
   /* ---- 核弹发射钮：3D 红钮嵌在金属底座里，外裹黄黑警示带 ---- */
   .nuke {
     --nuke: #d21f1f;            /* 钮面主红 */
@@ -197,6 +216,44 @@
     padding: 2px 12px;
   }
 
+  /* ---- 图片附件（UX-07）---- */
+  /* 待发缩略图条：在消息区和输入框之间 */
+  .thumbs {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    padding: 8px 16px 0;
+  }
+  .thumbs:empty { display: none; }   /* 没图就不占位 */
+  .thumb {
+    position: relative;
+    width: 64px; height: 64px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    overflow: hidden;
+    background: #faf9f6;
+  }
+  .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .thumb .rm {
+    position: absolute; top: 2px; right: 2px;
+    width: 18px; height: 18px; padding: 0;
+    border: 0; border-radius: 50%;
+    background: rgba(0,0,0,.6); color: #fff;
+    font-size: 12px; line-height: 18px; text-align: center; cursor: pointer;
+  }
+  .thumb .rm:hover { background: rgba(0,0,0,.85); }
+  /* 气泡里的图：限宽限高，不撑破布局 */
+  .bubble img {
+    display: block; max-width: 100%; max-height: 260px;
+    border-radius: 8px; margin: 4px 0;
+  }
+  .attach {
+    border: 0; background: transparent; color: var(--muted);
+    font-size: 20px; line-height: 1; cursor: pointer; padding: 0 6px;
+    align-self: center;
+  }
+  .attach:hover { color: var(--tale); }
+
   form {
     display: flex;
     gap: 10px;
@@ -240,10 +297,19 @@
     </button>
   </header>
 
+  <nav class="nav">
+    <a class="active" href="/">聊天</a>
+    <a href="/settings">设置</a>
+    <a href="/logs">日志</a>
+  </nav>
+
   <div id="messages"></div>
 
+  <div id="thumbs" class="thumbs"></div>
   <form id="composer">
-    <textarea id="input" placeholder="跟塔利说点什么…（Enter 发送，Shift+Enter 换行）" autofocus></textarea>
+    <button id="attach" class="attach" type="button" title="添加图片（也可直接粘贴）">＋</button>
+    <input id="file" type="file" accept="image/*" multiple hidden>
+    <textarea id="input" placeholder="跟塔利说点什么…" autofocus></textarea>
     <button id="send" type="submit">发送</button>
   </form>
 </div>
@@ -270,6 +336,9 @@ var inputEl = document.getElementById("input");
 var sendEl = document.getElementById("send");
 var statusEl = document.getElementById("status");
 var clearEl = document.getElementById("clear");
+var thumbsEl = document.getElementById("thumbs");
+var attachEl = document.getElementById("attach");
+var fileEl = document.getElementById("file");
 
 function setStatus(text, ok) {
   statusEl.textContent = text;
@@ -277,12 +346,28 @@ function setStatus(text, ok) {
 }
 
 // 一律用 textContent——绝不把内容塞 innerHTML，否则是 XSS 口子。
-function addBubble(text, who) {
+// images（可选）是**服务端文件名**列表（自己上传的，可信），用 <img src> 显示；
+// 即便如此也走 createElement + .src，不拼 HTML 字符串。
+function addBubble(text, who, images) {
   var row = document.createElement("div");
   row.className = "row " + who;
   var bubble = document.createElement("div");
   bubble.className = "bubble";
-  bubble.textContent = text;
+  if (text) bubble.appendChild(document.createTextNode(text));
+  (images || []).forEach(function (name) {
+    var img = document.createElement("img");
+    img.src = "/api/img/" + encodeURIComponent(name);
+    img.alt = "图片";
+    // 图可能已被回收（data/temp 超限删最早）——显示占位而不是裂图
+    img.onerror = function () {
+      var ph = document.createElement("span");
+      ph.textContent = "〔图片已不可用〕";
+      ph.style.color = "var(--muted)";
+      img.replaceWith(ph);
+    };
+    bubble.appendChild(img);
+  });
+  if (!bubble.childNodes.length) bubble.textContent = "";
   row.appendChild(bubble);
   messagesEl.appendChild(row);
   messagesEl.scrollTop = messagesEl.scrollHeight;
@@ -379,11 +464,23 @@ function connect() {
   ws.onmessage = function (ev) {
     var data = JSON.parse(ev.data);
 
-    // 历史帧：连上时服务端补发的旧消息，一次性渲染（刷新后历史完整的关键）
+    // 历史帧：连上时服务端补发的旧消息，一次性渲染（刷新后历史完整的关键）。
+    // 带图的消息 history_provider 会给 images 列表，一并渲染（UX-07）。
     if (data.type === "history") {
       messagesEl.innerHTML = "";
       (data.messages || []).forEach(function (m) {
-        addBubble(m.content, m.role === "user" ? "me" : "tale");
+        var who = m.role === "user" ? "me" : "tale";
+        // 带图的消息 m.images 有值（UX-07），一并渲染。
+        // assistant 行若带了分条数组（parts），每条一个气泡——否则刷新后
+        // 一次多段的回复会挤成一个气泡。旧行/用户消息没有 parts，回落单气泡。
+        // 图挂在**最后一条**上（图是随提问发的，不是分条内容的一部分）。
+        if (m.parts && m.parts.length) {
+          m.parts.forEach(function (p, i) {
+            addBubble(p, who, i === m.parts.length - 1 ? m.images : null);
+          });
+        } else {
+          addBubble(m.content, who, m.images);
+        }
       });
       return;
     }
@@ -409,13 +506,145 @@ function connect() {
   };
 }
 
-// ---- 发送 --------------------------------------------------------------------
+// ---- 图片附件（UX-07）-------------------------------------------------------
+// 待发图片：先 POST /api/upload 换回服务端文件名，再随消息帧发出。
+// 为什么先上传：大图塞进 WS JSON 会卡、会顶爆帧；HTTP 上传能做大小/类型校验。
+// pending[] 存 {name, url}——url 是本地 objectURL，仅用于缩略图预览。
+var pendingImages = [];
+
+function addPendingImage(file) {
+  if (!file || !/^image\//.test(file.type)) return;
+  if (pendingImages.length >= 4) { addSystemNote("一次最多 4 张图"); return; }
+  // 先本地预览（objectURL），同时后台上传换服务端名字
+  var url = URL.createObjectURL(file);
+  var entry = { name: null, url: url, el: null };
+  pendingImages.push(entry);
+  renderThumbs();
+  // 直接把文件当请求体发（原始字节 + 图片 Content-Type），后端读 request.body()
+  // ——省掉 multipart 依赖，一图一请求刚好。
+  fetch("/api/upload", {
+    method: "POST",
+    headers: { "Content-Type": file.type || "application/octet-stream" },
+    body: file
+  })
+    .then(function (r) { return r.json(); })
+    .then(function (j) {
+      if (!j.ok) { removePending(entry); addSystemNote("图片上传失败：" + (j.error || "")); return; }
+      entry.name = j.name;
+    })
+    .catch(function (e) { removePending(entry); addSystemNote("图片上传失败：" + e); });
+}
+
+function removePending(entry) {
+  var i = pendingImages.indexOf(entry);
+  if (i >= 0) pendingImages.splice(i, 1);
+  if (entry.url) URL.revokeObjectURL(entry.url);
+  renderThumbs();
+}
+
+function renderThumbs() {
+  thumbsEl.textContent = "";   // 清空（清空不算塞内容）
+  pendingImages.forEach(function (entry) {
+    var box = document.createElement("div");
+    box.className = "thumb";
+    var img = document.createElement("img");
+    img.src = entry.url;
+    var rm = document.createElement("button");
+    rm.type = "button";
+    rm.className = "rm";
+    rm.textContent = "×";
+    rm.title = "移除";
+    rm.addEventListener("click", function () { removePending(entry); });
+    box.appendChild(img);
+    box.appendChild(rm);
+    entry.el = box;
+    thumbsEl.appendChild(box);
+  });
+}
+
+// 只把**已上传完成**（name 非空）的图带进消息；还在传的先等一拍
+function readyImageNames() {
+  return pendingImages.filter(function (e) { return e.name; }).map(function (e) { return e.name; });
+}
+
+function clearPendingImages() {
+  pendingImages.forEach(function (e) { if (e.url) URL.revokeObjectURL(e.url); });
+  pendingImages = [];
+  renderThumbs();
+}
+
+// 粘贴图片：从剪贴板里挑出图片项
+inputEl.addEventListener("paste", function (e) {
+  var items = (e.clipboardData && e.clipboardData.items) || [];
+  var got = false;
+  for (var i = 0; i < items.length; i++) {
+    if (items[i].kind === "file" && /^image\//.test(items[i].type)) {
+      addPendingImage(items[i].getAsFile());
+      got = true;
+    }
+  }
+  if (got) e.preventDefault();   // 有图就别把二进制粘进文本框
+});
+
+attachEl.addEventListener("click", function () { fileEl.click(); });
+fileEl.addEventListener("change", function () {
+  for (var i = 0; i < fileEl.files.length; i++) addPendingImage(fileEl.files[i]);
+  fileEl.value = "";   // 允许再次选同一个文件
+});
+
+// ---- 聊天框命令（& 或 / 开头）------------------------------------------------
+// 内置命令：&newtale 重置会话；&help 显示说明。都**不进模型**、不出气泡。
+// 前缀 & 与 / 都认——& 跟正文不撞，/ 是大家更熟的习惯，两个都放行省得记。
+var RESET_CMD = "&newtale";
+var HELP_CMD = "&help";
+
+// 把一行文字归一成命令名（去掉首尾空白、去掉一个前缀、转小写）。
+// 不是命令（没有 & / 前缀）返回 ""。
+function commandOf(text) {
+  var t = (text || "").trim();
+  if (!t || (t[0] !== "&" && t[0] !== "/")) return "";
+  return t.slice(1).toLowerCase();
+}
+
+function isResetCommand(text) { return commandOf(text) === "newtale"; }
+function isHelpCommand(text) { return commandOf(text) === "help"; }
+
+function showHelp() {
+  addSystemNote("&newtale 或 /newtale —— 重置本次会话（会话号不变）");
+  addSystemNote("&help 或 /help —— 显示本说明");
+  addSystemNote("也可以直接粘贴图片发给我看；Enter 发送，Shift+Enter 换行");
+}
+
 function send() {
   var text = inputEl.value.trim();
-  if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
-  addBubble(text, "me");
-  ws.send(JSON.stringify({ content: text, session_id: SID }));
+  var images = readyImageNames();
+  // 有文字或有（已上传的）图，且连接通，才发得出
+  if ((!text && !images.length) || !ws || ws.readyState !== WebSocket.OPEN) {
+    if ((text || pendingImages.length) && pendingImages.some(function (e) { return !e.name; })) {
+      addSystemNote("图片还在上传，稍等一下");
+    }
+    return;
+  }
+
+  // &help：本地显示命令说明，不发服务端、不出气泡。
+  if (isHelpCommand(text) && !images.length) {
+    inputEl.value = "";
+    showHelp();
+    return;
+  }
+
+  // &newtale 是命令不是聊天：重置会话，不发给模型、不出现气泡。
+  // 单次即清（跟核弹钮的两下确认不同）——用户是**主动敲的命令**，不是误触。
+  if (isResetCommand(text) && !images.length) {
+    inputEl.value = "";
+    ws.send(JSON.stringify({ action: "clear", session_id: SID }));
+    return;
+  }
+
+  addBubble(text, "me", images);
+  ws.send(JSON.stringify({ content: text, session_id: SID, images: images }));
   inputEl.value = "";
+  clearPendingImages();
   sendEl.disabled = true;
   pending = addBubble("塔利在想…", "tale");
   pending.classList.add("thinking");

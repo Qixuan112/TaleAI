@@ -35,20 +35,20 @@ class PermissionGuard:
 
     def __init__(self, registry: PluginRegistry | None = None) -> None:
         self._registry = registry if registry is not None else PluginRegistry()
-        # 启停覆盖：{插件名: bool}。不在表里就按来源取默认（内置启用/外部停用）
-        self._enabled_override: dict[str, bool] = {}
+        # 启停状态**由注册表持有**（tool_schemas 过滤和这里都要看它，只有一处
+        # 真相才不会两边打架）。守卫只保留"已授予的权限"。
         # 已授予的权限：{插件名: {权限, ...}}。默认空 = 默认 deny
         self._granted: dict[str, set[str]] = {}
 
     # ---------- 用户侧（面板 / 测试）改状态 ----------
 
     def enable(self, plugin_name: str) -> None:
-        """启用插件（权限仍需单独 grant）。"""
-        self._enabled_override[plugin_name] = True
+        """启用插件（权限仍需单独 grant）。委派给注册表，保持单一真相。"""
+        self._registry.enable(plugin_name)
 
     def disable(self, plugin_name: str) -> None:
-        """停用插件：它的所有工具立即不可调用。"""
-        self._enabled_override[plugin_name] = False
+        """停用插件：它的所有工具立即不可调用（也不进模型工具表）。"""
+        self._registry.disable(plugin_name)
 
     def grant(self, plugin_name: str, *permissions: str) -> None:
         """授予插件权限。这是唯一能开权限的入口——不在工具表里，模型够不着。"""
@@ -83,7 +83,7 @@ class PermissionGuard:
         if tool is None:
             return False, f"没有名为 {tool_name!r} 的工具"
 
-        if not self._is_enabled(tool.plugin):
+        if not self._registry.plugin_enabled(tool.plugin):
             return False, f"插件 {tool.plugin!r} 未启用，无法调用 {tool_name!r}"
 
         missing = self._missing_permissions(tool.plugin)
@@ -94,15 +94,6 @@ class PermissionGuard:
             )
 
         return True, ""
-
-    def _is_enabled(self, plugin_name: str) -> bool:
-        """内置默认启用，外部默认停用（§19-11）；显式覆盖优先。"""
-        if plugin_name in self._enabled_override:
-            return self._enabled_override[plugin_name]
-        record = self._registry.plugins().get(plugin_name)
-        if record is None:
-            return False  # 插件都没加载，谈不上启用
-        return record.source == "builtin"
 
     def _missing_permissions(self, plugin_name: str) -> list[str]:
         """插件声明了但还没被授予的权限。"""

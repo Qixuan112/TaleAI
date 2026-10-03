@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import pytest
 
-from core.bus.event_bus import EventBus
+from core.event_bus import EventBus
 from core.executor import ToolCall, ToolExecutor
 from core.plugin.guard import PermissionGuard
 from core.plugin.registry import PluginRegistry
@@ -284,3 +284,46 @@ def test_no_bus_means_no_publish(registry):
     registry.scan()
     ex = ToolExecutor(registry)  # 无 bus
     ex.execute(call("ping"))  # 不抛即通过（没法订阅到，只为确认不炸）
+
+
+# ---------- 隔离加固：BaseException 不外泄（PR #10） ----------
+
+
+def test_systemexit_in_tool_becomes_failed_result(registry, tmp_path):
+    """工具里 sys.exit() 不能让进程结束——收成一个 ok=False 的 ToolResult。
+
+    SystemExit 不是 Exception 子类，`except Exception` 拦不住它；原实现会让
+    整个进程被带走（PR #10 子进程复现）。
+    """
+    ext = tmp_path / "ext"
+    write_plugin(ext, "sui", main_py=(
+        "import sys\n"
+        "from core.plugin.registry import register\n"
+        "@register.tool(name='sui_tool', schema={})\n"
+        "def sui_tool():\n"
+        "    sys.exit(4)\n"
+    ))
+    registry.scan(builtin_dir=tmp_path / "none", external_dir=ext)
+    guard = PermissionGuard(registry)
+    guard.enable("sui")
+    result = ToolExecutor(registry, guard).execute(call("sui_tool"))
+    assert result.ok is False
+    assert "SystemExit" in result.error
+
+
+def test_cancellederror_in_tool_becomes_failed_result(registry, tmp_path):
+    """工具里抛 CancelledError 不该拆掉前台循环——同样收成失败结果。"""
+    ext = tmp_path / "ext"
+    write_plugin(ext, "cx", main_py=(
+        "import asyncio\n"
+        "from core.plugin.registry import register\n"
+        "@register.tool(name='cx_tool', schema={})\n"
+        "def cx_tool():\n"
+        "    raise asyncio.CancelledError()\n"
+    ))
+    registry.scan(builtin_dir=tmp_path / "none", external_dir=ext)
+    guard = PermissionGuard(registry)
+    guard.enable("cx")
+    result = ToolExecutor(registry, guard).execute(call("cx_tool"))
+    assert result.ok is False
+    assert "CancelledError" in result.error

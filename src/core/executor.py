@@ -14,7 +14,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from core.bus.event_bus import EventBus
+from core.event_bus import EventBus
 from core.plugin.guard import PermissionGuard
 from core.plugin.registry import PluginRegistry
 
@@ -117,7 +117,15 @@ class ToolExecutor:
 
         try:
             raw = tool.handler(**call.arguments)
-        except Exception as e:  # 插件代码是外来的，坏了不能拖垮链路
+        except BaseException as e:
+            # 插件代码是外来的，坏了不能拖垮链路。
+            # 捕 BaseException 而不是 Exception：工具里 `sys.exit()` 抛的
+            # SystemExit、或 `raise CancelledError()`，都不是 Exception 子类——
+            # 用 except Exception 会让它们穿出去结束整个进程、或拆掉前台循环
+            # （PR #10 已复现：进程被 sys.exit(4) 带走 / CancelledError 冒泡停掉
+            # serve_forever）。KeyboardInterrupt 例外：用户 Ctrl-C 该照常退出。
+            if isinstance(e, KeyboardInterrupt):
+                raise
             logger.exception("工具 %r 执行出错", call.name)
             return ToolResult(
                 call=call, ok=False, error=f"工具执行出错：{type(e).__name__}: {e}"

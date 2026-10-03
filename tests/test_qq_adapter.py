@@ -17,9 +17,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 import pytest
 from fastapi.testclient import TestClient
 
+from core.adapter import qq as qq_pkg
 from core.adapter.base import Reply
+from core.adapter.qq import adapter as qq_adapter_mod
 from core.adapter.qq.adapter import QQAdapter
-from core.bus.event_bus import EventBus
+from core.event_bus import EventBus
 
 
 @pytest.fixture(autouse=True)
@@ -100,6 +102,64 @@ def test_disconnect_clears_connection():
     with TestClient(a.app).websocket_connect("/qq"):
         assert a.connected()
     assert not a.connected()
+
+
+# ---------- 端点鉴权与多连接（PR #10 High） ----------
+
+
+def test_token_mismatch_is_rejected():
+    """配了 access_token 后，token 不符的连接被拒——否则谁都能顶掉 SnowLuma。"""
+    a = QQAdapter()
+    a.access_token = "sekret"
+    with pytest.raises(Exception):  # TestClient 连不上就是被 close 了
+        with TestClient(a.app).websocket_connect("/qq?access_token=wrong"):
+            pass
+    assert a.connected() is False
+
+
+def test_token_via_query_is_accepted():
+    a = QQAdapter()
+    a.access_token = "sekret"
+    with TestClient(a.app).websocket_connect("/qq?access_token=sekret"):
+        assert a.connected() is True
+
+
+def test_token_via_bearer_is_accepted():
+    a = QQAdapter()
+    a.access_token = "sekret"
+    with TestClient(a.app).websocket_connect(
+        "/qq", headers={"Authorization": "Bearer sekret"}
+    ):
+        assert a.connected() is True
+
+
+def test_no_token_configured_means_open():
+    """默认（没配 token）不校验——保持 M0 单机用法不变。"""
+    a = QQAdapter()
+    assert a.access_token == ""
+    with TestClient(a.app).websocket_connect("/qq"):
+        assert a.connected() is True
+
+
+def test_new_connection_supersedes_and_closes_old():
+    """新连接顶上：bot_id 跟随新连接，且旧连接被主动关闭而不是留成哑巴。
+
+    旧实现的 bug：只替换 _link、不关旧的 → 旧连接还开着（能收事件），
+    新连接一断 _link 置 None，旧连接却被当成"当前连接"以外的、来不及回退，
+    机器人彻底变哑（PR #10）。
+    """
+    a = QQAdapter()
+    client = TestClient(a.app)
+    with client.websocket_connect("/qq", headers={"X-Self-ID": "10001"}) as first:
+        assert a.bot_id == "10001"
+        with client.websocket_connect("/qq", headers={"X-Self-ID": "10002"}) as second:
+            # 新连接顶上但没断：仍算连接着，bot_id 已更新
+            assert a.connected() is True
+            assert a.bot_id == "10002"
+        # 第二条断开后：没有残留的活连接挂在 _link 上
+        assert a.connected() is False
+    # 第一条（被服务端主动 close 过）退出时也不该把状态搞乱
+    assert a.connected() is False
 
 
 # ---------- 发：Reply → OneBot 动作 ----------
@@ -202,7 +262,7 @@ async def test_split_waits_between_messages_but_not_before_first(monkeypatch):
 
 
 async def test_send_without_connection_is_skipped_not_raised():
-    """没连上就发 → 记日志跳过，不抛（跟 WebSocketAdapter 一致）。"""
+    """没连上就发 → 记日志跳过，不抛（跟 WebAdapter 一致）。"""
     a = QQAdapter()
     await a.send(Reply(session_id="qq:p1", messages=["x"]))  # 不抛即通过
 
@@ -255,17 +315,21 @@ def group_event_plain(user_id=20002000, text="今天天气不错"):
     }
 
 
-def test_group_message_without_at_is_ignored():
-    """群聊没 @ 机器人 → 不响应。否则在活跃群里会疯狂刷屏 + 烧钱。"""
+def test_group_message_without_at_is_delivered_with_addressed_false():
+    """群聊没 @ 机器人 → **仍投递**，只把 addressed 标成 False。
+
+    UX-03 改了这里：适配器不再自行丢弃未 @ 的群消息（那样"未唤醒也存进历史"
+    就无从谈起），改由前台按唤醒策略决定——所以适配器只给平台事实。
+    """
     a = QQAdapter()
     a.bot_id = "10001"
     with TestClient(a.app).websocket_connect(
         "/qq", headers={"X-Self-ID": "10001"}
     ) as ws:
         ws.send_json(group_event_plain(text="别人在聊天"))
-        ws.send_json(group_event_at(text=" @我了才该回"))
         m = _drain(a)
-    assert "别人在聊天" not in m.content
+    assert m.content == "别人在聊天"
+    assert m.addressed is False
 
 
 def test_group_message_with_at_is_answered():
@@ -276,6 +340,7 @@ def test_group_message_with_at_is_answered():
         ws.send_json(group_event_at())
         m = _drain(a)
     assert m.session_id == "qq:g30003000"
+    assert m.addressed is True
 
 
 def test_at_mention_is_stripped_from_content():
@@ -312,10 +377,11 @@ def test_group_at_via_cq_string_also_recognized():
         ws.send_json(ev)
         m = _drain(a)
     assert m.session_id == "qq:g30003000"
+    assert m.addressed is True
 
 
-def test_group_at_other_person_is_ignored():
-    """@ 的是别人不是机器人 → 不响应。"""
+def test_group_at_other_person_marks_not_addressed():
+    """@ 的是别人不是机器人 → addressed=False（前台会按唤醒策略决定回不回）。"""
     a = QQAdapter()
     with TestClient(a.app).websocket_connect(
         "/qq", headers={"X-Self-ID": "10001"}
@@ -324,6 +390,70 @@ def test_group_at_other_person_is_ignored():
         ev["message"] = [{"type": "at", "data": {"qq": "99999"}},
                          {"type": "text", "data": {"text": " @的是别人"}}]
         ws.send_json(ev)
-        ws.send_json(private_event(text="我是私聊"))
         m = _drain(a)
-    assert m.content == "我是私聊"  # 前一条被忽略，等到的是私聊那条
+    assert m.addressed is False
+
+
+# ---------- 图片下载（UX-08）----------
+
+
+def test_image_downloaded_into_images(monkeypatch):
+    """带图消息：URL 被下载 → 文件名进 Message.images。"""
+    monkeypatch.setattr(qq_adapter_mod, "download_image",
+                        lambda url: "fake_" + url.rsplit("/", 1)[-1])
+    a = QQAdapter()
+    with TestClient(a.app).websocket_connect(
+        "/qq", headers={"X-Self-ID": "10001"}
+    ) as ws:
+        ws.send_json(private_event(text=[
+            {"type": "text", "data": {"text": "看图"}},
+            {"type": "image", "data": {"url": "https://x/a.png"}},
+        ]))
+        m = _drain(a)
+    assert m.images == ["fake_a.png"]
+    assert m.content == "看图"
+
+
+def test_pure_image_message_is_delivered(monkeypatch):
+    """纯图片（无文字）不再被丢弃——图就是内容。"""
+    monkeypatch.setattr(qq_adapter_mod, "download_image", lambda url: "img.png")
+    a = QQAdapter()
+    with TestClient(a.app).websocket_connect(
+        "/qq", headers={"X-Self-ID": "10001"}
+    ) as ws:
+        ws.send_json(private_event(text=[
+            {"type": "image", "data": {"url": "https://x/only.png"}},
+        ]))
+        m = _drain(a)
+    assert m.images == ["img.png"]
+    assert m.content == ""
+
+
+def test_image_download_failure_degrades_to_text(monkeypatch):
+    """下载失败（返回 None）→ 当无图，不能卡住链路。"""
+    monkeypatch.setattr(qq_adapter_mod, "download_image", lambda url: None)
+    a = QQAdapter()
+    with TestClient(a.app).websocket_connect(
+        "/qq", headers={"X-Self-ID": "10001"}
+    ) as ws:
+        ws.send_json(private_event(text=[
+            {"type": "text", "data": {"text": "文字还在"}},
+            {"type": "image", "data": {"url": "https://x/broken.png"}},
+        ]))
+        m = _drain(a)
+    assert m.images == []
+    assert m.content == "文字还在"
+
+
+def test_image_download_capped(monkeypatch):
+    monkeypatch.setattr(qq_adapter_mod, "download_image", lambda url: "i.png")
+    monkeypatch.setattr(qq_adapter_mod, "MAX_IMAGES_PER_MESSAGE", 2)
+    a = QQAdapter()
+    with TestClient(a.app).websocket_connect(
+        "/qq", headers={"X-Self-ID": "10001"}
+    ) as ws:
+        ws.send_json(private_event(text=[
+            {"type": "image", "data": {"url": f"https://x/{i}.png"}} for i in range(5)
+        ]))
+        m = _drain(a)
+    assert len(m.images) == 2
