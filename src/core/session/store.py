@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS messages(
   tool_json TEXT,
   -- assistant 分条数组(JSON);NULL=旧行/单条,读时回落启发式。content 仍是权威纯文本
   parts_json TEXT,
+  attachments TEXT,                 -- 图片文件名 JSON 数组（UX-06 多模态）
   ts REAL NOT NULL
 );
 
@@ -82,7 +83,7 @@ CREATE TABLE IF NOT EXISTS session_cursors(
 # 是纯元数据操作（不重写表、不复制数据），旧行自动为 NULL，瞬时完成——
 # 一个探测 + 补列就够了，没必要为一行列号上 Alembic 那种重器。
 _ADDED_COLUMNS = {
-    "messages": {"parts_json": "TEXT"},
+    "messages": {"parts_json": "TEXT", "attachments": "TEXT"},
 }
 
 
@@ -133,7 +134,8 @@ class SessionStore:
             conn.executescript(_SCHEMA)
             # 旧库补列：新建库已含全部列（executescript 的 IF NOT EXISTS 建表
             # 语句只在表不存在时生效，老库的表不会因此被改成新形状），所以这里
-            # 专门探测 + 补——两条路径都幂等。
+            # 专门探测 + 补——两条路径都幂等。parts_json（#11）与 attachments
+            # （#12）都在 _ADDED_COLUMNS 里，统一走这一条。
             _ensure_columns(conn)
             conn.commit()
         except Exception:
@@ -218,6 +220,7 @@ class SessionStore:
         parts: list[str] | None = None,
         mentions: list[str] | None = None,
         reply_to: str | None = None,
+        attachments: list[str] | None = None,
         ts: float | None = None,
     ) -> int:
         """追加一条消息，返回它的 seq。
@@ -229,6 +232,9 @@ class SessionStore:
         下一轮补 <msg> 标签时按它精确还原，不必去猜 content 里的空行（审查
         PR #10：content 用 \\n\\n 拼/拆无法往返）。user 行不需要传，传了也
         只对 assistant 有意义。parts 为空/None → 该列存 NULL，读时回落旧启发式。
+
+        attachments：本条消息带的图片文件名列表（UX-06）。只存文件名，
+        图片本体在 data/temp/img/（可回收）——两者生命周期不同，不混存。
         """
         if role not in {"user", "assistant", "system"}:
             raise ValueError(f"非法的 role: {role!r}")
@@ -252,16 +258,18 @@ class SessionStore:
             parts_json = json.dumps(parts, ensure_ascii=False)
         else:
             parts_json = None
+        if attachments is not None:
+            attachments = json.dumps(attachments, ensure_ascii=False)
 
         with self._lock:
             cur = self._db.execute(
                 """
                 INSERT INTO messages(session_id, role, content, mentions, reply_to,
-                                     tool_json, parts_json, ts)
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                                     tool_json, parts_json, attachments, ts)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (session_id, role, content, mentions, reply_to, tool_json,
-                 parts_json, time.time() if ts is None else ts),
+                 parts_json, attachments, time.time() if ts is None else ts),
             )
             self._db.commit()
             return int(cur.lastrowid)
@@ -273,6 +281,11 @@ class SessionStore:
 
         返回 [{"role", "content"}]——正是 assemble_messages 需要的形状，
         这样调用方不用再做一次转换。
+
+        ❗attachments 有意**不进返回值**：history() 的消费者（ChatLLM 装配、
+        WebUI 历史帧）走的是"文本为主"的路径，喂历史里的图给模型是 UX-07/08
+        的事。要图请用 messages()。这样也保住了 `history() == [{role, content}]`
+        这个被多处测试钉死的契约。
 
         limit 取的是**最近** N 条（尾部），但返回时仍是正序——
         直接 `ORDER BY seq DESC LIMIT n` 会得到倒序，得在内存里翻回来。
@@ -308,6 +321,39 @@ class SessionStore:
                     entry["parts"] = parts
             result.append(entry)
         return result
+
+    def history_with_attachments(self, session_id: str) -> list[dict]:
+        """给 WebUI 历史帧用：[{role, content, images, parts}]。
+
+        - images：图片文件名列表（UX-06），网页回放要显示图。
+        - parts：assistant 的分条数组（#11），网页要把一次多段回复拆成多气泡。
+
+        跟 history() 分开的原因：history() 是喂模型/给记忆的**文本契约**
+        （被多处测试钉着，不含附件/parts）；网页回放需要这两样。两者别合并——
+        模型不该因为界面上有图就改变喂进去的历史形状。
+        """
+        rows = self._db.execute(
+            "SELECT role, content, attachments, parts_json FROM messages "
+            "WHERE session_id = ? ORDER BY seq",
+            (session_id,),
+        ).fetchall()
+        out = []
+        for r in rows:
+            imgs = []
+            if r["attachments"]:
+                try:
+                    imgs = json.loads(r["attachments"])
+                except (json.JSONDecodeError, TypeError):
+                    imgs = []
+            parts = None
+            if r["parts_json"]:
+                try:
+                    parts = json.loads(r["parts_json"])
+                except (json.JSONDecodeError, TypeError):
+                    parts = None
+            out.append({"role": r["role"], "content": r["content"],
+                        "images": imgs, "parts": parts})
+        return out
 
     def messages(self, session_id: str, limit: int | None = None) -> list[dict]:
         """读回带元信息的完整行（排障用：看得到 tool_json / mentions / ts）。"""

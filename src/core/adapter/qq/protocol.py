@@ -40,6 +40,10 @@ def _extract_text_and_mentions(message) -> tuple[str, list[str]]:
 
     两种都要处理：**不能假设用户配的是哪种**，配错一种就整个适配器哑掉，
     而这是配置项不是代码 bug，用户很难自己查出来。
+
+    图片段（type=image / CQ:image）**不在这里取**——它的 url 要下载落地，
+    是适配器层的活（要网络、要 image_store），保持本模块纯函数（见
+    `extract_image_urls`）。
     """
     if isinstance(message, list):
         texts: list[str] = []
@@ -55,12 +59,11 @@ def _extract_text_and_mentions(message) -> tuple[str, list[str]]:
                 qq = data.get("qq")
                 if qq is not None:
                     mentions.append(str(qq))
-            # 其余段（image / face / record...）M0 不处理：模型看不到图，
-            # 塞进去只会让它困惑。以后要支持图片再加。
+            # 其余段（face / record...）不处理。
         return "".join(texts), mentions
 
     if isinstance(message, str):
-        # 字符串形态：@ 从 CQ 码里捡，正文把 CQ 码剥掉
+        # 字符串形态：@ 从 CQ 码里捡，正文把 CQ 码剥掉（含 image 码，见下）
         mentions = [
             m.group(1)
             for m in re.finditer(r"\[CQ:at,qq=([^,\]]+)", message)
@@ -69,6 +72,38 @@ def _extract_text_and_mentions(message) -> tuple[str, list[str]]:
         return text, mentions
 
     return "", []
+
+
+def extract_image_urls(message) -> list[str]:
+    """从 message 段里捞出图片 URL（UX-08）。纯函数，只认结构、不下载。
+
+    - array：`[{"type":"image","data":{"url":"http://..."}}]`
+    - string：`[CQ:image,file=x,url=http://...]`（url 参数可选，缺了就没有）
+
+    有些实现把 url 放在 `data.file` 里（OneBot 允许 file 是 URL）——
+    兜底也看一眼。取到什么算什么，下载失败在适配器层降级（当无图）。
+    """
+    urls: list[str] = []
+    if isinstance(message, list):
+        for seg in message:
+            if not isinstance(seg, dict) or seg.get("type") != "image":
+                continue
+            data = seg.get("data") or {}
+            url = data.get("url") or data.get("file")
+            if isinstance(url, str) and url.startswith(("http://", "https://")):
+                urls.append(url)
+    elif isinstance(message, str):
+        for m in re.finditer(r"\[CQ:image,([^\]]*)\]", message):
+            params = m.group(1)
+            url = None
+            for part in params.split(","):
+                k, _, v = part.partition("=")
+                if k.strip() in ("url", "file") and v.startswith(("http://", "https://")):
+                    url = v
+                    break
+            if url:
+                urls.append(url)
+    return urls
 
 
 def _session_id(message_type: str, target_id) -> str:
@@ -108,6 +143,9 @@ def parse_event(data: dict) -> Message | None:
         return None
 
     content, mentions = _extract_text_and_mentions(data.get("message"))
+    # 图片 URL 先捞出来放 meta——真正的下载落地是适配器层的事（要网络），
+    # 本模块保持纯函数。适配器读完 meta 会 download → 填进 Message.images。
+    image_urls = extract_image_urls(data.get("message"))
 
     return Message(
         id=str(data.get("message_id") or ""),
@@ -120,7 +158,8 @@ def parse_event(data: dict) -> Message | None:
         mentions=mentions,
         reply_to=None,
         ts=float(data.get("time") or 0),
-        meta={"message_type": message_type, "self_id": data.get("self_id")},
+        meta={"message_type": message_type, "self_id": data.get("self_id"),
+              "image_urls": image_urls},
         # 群聊有别人在场，说话方式该不一样——模型需要知道（§十二）
         session_type=message_type,
     )

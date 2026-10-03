@@ -26,6 +26,14 @@ DEFAULT_CONFIG = {
     "bot": {
         "name": "塔利",
     },
+    # 关键词唤醒（UX-03）：群里只有"叫它"的消息才回，其余的存进历史但不回。
+    #   words = 唤醒词列表（默认叫名字），正文里**包含**任一即算叫它、不剥离
+    #   scope = 生效范围：group(仅群聊，默认) / all(所有会话) / off(关闭)
+    # 私聊与 WebUI 默认不受影响（scope=group）——打开就是在找它，不必喊名字。
+    "wake": {
+        "words": ["塔利"],
+        "scope": "group",
+    },
     # 平台接入（M0 留空即可，YAGNI）
     "platforms": {},
 }
