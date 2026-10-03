@@ -200,8 +200,10 @@ class WebSocketAdapter(AdapterBase):
                         await self._clear_and_reply(websocket, session_id)
                         continue
                     message = self.normalize({**raw, "session_id": session_id})
-                    if not message.content:
-                        continue  # 空消息不发请求（跟 CLI 的空行一致）
+                    # 空消息不发请求（跟 CLI 的空行一致）。但**纯图消息**（只有图、
+                    # 没文字）是合法输入——图就是内容，不能按空丢掉（UX-07）。
+                    if not message.content and not message.images:
+                        continue
                     self._deliver(message)
             except WebSocketDisconnect:
                 pass

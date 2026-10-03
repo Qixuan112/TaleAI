@@ -103,6 +103,30 @@ def test_empty_message_is_not_delivered():
     assert a._inbox.qsize() == 0
 
 
+def test_pure_image_message_is_delivered():
+    """纯图消息（只有图、无文字）是合法输入——不能被空守卫丢掉（UX-07）。
+
+    兔老师抓到：空守卫只看 content，纯图消息会被当空 `continue` 掉。
+    """
+    a = WebSocketAdapter()
+    with TestClient(a.app).websocket_connect("/ws") as ws:
+        ws.send_json({"content": "", "images": ["pic.png"]})
+        msg = _drain_inbox(a)
+    assert msg.images == ["pic.png"]
+    assert msg.content == ""
+
+
+def test_truly_empty_message_still_dropped():
+    """既无文字又无图，才是真空——仍要丢。"""
+    a = WebSocketAdapter()
+    with TestClient(a.app).websocket_connect("/ws") as ws:
+        ws.send_json({"content": "  "})
+        ws.send_json({"content": "真消息"})
+        msg = _drain_inbox(a)
+    assert msg.content == "真消息"
+    assert a._inbox.qsize() == 0
+
+
 def test_connection_registers_and_cleans_up_session():
     a = WebSocketAdapter()
     with TestClient(a.app).websocket_connect("/ws?session_id=web:abc"):

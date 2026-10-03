@@ -152,3 +152,45 @@ def test_settings_routes_absent_without_injection():
     a = WebSocketAdapter()
     paths = {getattr(r, "path", None) for r in a.app.routes}
     assert "/api/settings/fields" not in paths
+
+
+# ---------- 兔老师审查：写接口加固（2026-10-03）----------
+
+
+def test_save_rejects_non_json_content_type(client):
+    """非 application/json → 415（挡跨站表单 POST）。"""
+    r = client.post("/api/settings/values",
+                    content='domain=config&values=x',
+                    headers={"Content-Type": "application/x-www-form-urlencoded"})
+    assert r.status_code == 415
+
+
+def test_save_rejects_cross_origin(client):
+    """Origin 与 Host 不同源 → 403（CSRF 防护）。"""
+    r = client.post("/api/settings/values",
+                    json={"domain": "config", "values": {}},
+                    headers={"Origin": "https://evil.example"})
+    assert r.status_code == 403
+
+
+def test_save_rejects_malformed_json_as_400_not_500(client):
+    """畸形 JSON 归 400，不是 500 堆栈。"""
+    r = client.post("/api/settings/values",
+                    content="{not json",
+                    headers={"Content-Type": "application/json"})
+    assert r.status_code == 400
+    assert r.json()["ok"] is False
+
+
+def test_save_rejects_non_object_body(client):
+    r = client.post("/api/settings/values",
+                    content="[1,2,3]",
+                    headers={"Content-Type": "application/json"})
+    assert r.status_code == 400
+
+
+def test_save_allows_json_no_origin(client):
+    """没有 Origin（脚本/curl 客户端）→ 放行（同源策略只约束浏览器）。"""
+    r = client.post("/api/settings/values",
+                    json={"domain": "config", "values": {"bot.name": "塔利"}})
+    assert r.status_code == 200

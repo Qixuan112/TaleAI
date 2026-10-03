@@ -139,7 +139,24 @@ def build_settings_routes(
 
         @app.post("/api/settings/values")
         async def save(request: Request) -> JSONResponse:
-            body = await request.json()
+            # 1) CSRF 防护：跨站表单 POST 也带 Cookie 但不带正确 Content-Type 之外的
+            #    东西——这里双重把关：要求 application/json + Origin 与 Host 同源。
+            ctype = (request.headers.get("content-type") or "").split(";")[0].strip()
+            if ctype != "application/json":
+                return _bad("需要 Content-Type: application/json", code=415)
+            origin = request.headers.get("origin")
+            if origin:
+                host = origin.split("://", 1)[-1].split("/", 1)[0]
+                if host != request.headers.get("host"):
+                    return _bad("跨站请求被拒", code=403)
+            # 2) 畸形 JSON 不能变成 500——归成 400。
+            try:
+                body = await request.json()
+            except Exception:
+                return _bad("请求体不是合法 JSON")
+            if not isinstance(body, dict):
+                return _bad("请求体必须是 JSON 对象")
+
             domain = str(body.get("domain") or "config")
             incoming = body.get("values") or {}
             try:

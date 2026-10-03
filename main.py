@@ -111,7 +111,10 @@ async def handle_message(
                 session_id, platform=message.platform, owner=message.owner,
                 kind=message.session_type or "private",
             )
-            store.append(session_id, "user", message.content)
+            # 图也要落库——未唤醒的群消息同样可能带图（纯图消息更是只有图），
+            # 漏了 attachments 会让这些图在历史里凭空消失。
+            store.append(session_id, "user", message.content,
+                         attachments=list(message.images or []) or None)
         except Exception:
             logger.exception("未唤醒消息落库失败，跳过")
         logger.debug("群聊未唤醒，已存库但不回：session=%s", session_id)

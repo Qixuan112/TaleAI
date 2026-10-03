@@ -258,3 +258,28 @@ async def test_images_persisted_and_passed_to_model(wiring):
     assert bot.calls[0][2] == ["a.png"]                      # 传给模型
     # 历史契约不变（不含 attachments）
     assert store.history("s1")[0] == {"role": "user", "content": "看看这张"}
+
+
+# ================= 兔老师审查抓到的缺口（2026-10-03）=================
+
+
+async def test_unwoken_group_image_message_persists_attachments(wiring, monkeypatch):
+    """群聊未唤醒的**带图**消息，图也要落库（不能只落文字丢图）。
+
+    兔老师抓到：未唤醒分支的 store.append 漏了 attachments。
+    """
+    main, adapter, router, bot, store, bus = wiring
+    from core.wake import WakePolicy
+    policy = WakePolicy(words=("塔利",), scope="group")
+
+    msg = Message(id="m", platform="fake", session_id="g1", owner="u1",
+                  direction="in", role="user", content="随便说说",
+                  session_type="group", images=["pic.png"])
+    reply = await main.handle_message(
+        msg, router=router, store=store, bot=bot, bus=bus, wake=policy)
+    assert reply is None                        # 未唤醒：不回
+    assert bot.calls == []                      # 不调模型
+    import json
+    rows = store.messages("g1")
+    assert rows and rows[0]["role"] == "user"
+    assert json.loads(rows[0]["attachments"]) == ["pic.png"]   # 图没丢
