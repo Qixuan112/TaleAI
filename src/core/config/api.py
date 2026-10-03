@@ -91,6 +91,20 @@ def _bad(msg: str, code: int = 400) -> JSONResponse:
     return JSONResponse({"ok": False, "error": msg}, status_code=code)
 
 
+#: 保存成功后的"生效方式"说明（PR3 热重载）。按域**如实**说明——不许虚假
+#: 宣传：多数项下一句对话即生效，个别项列出来（web.port 是监听端口，换端口
+#: 只能重启；QQ 的地址/密钥在"下次开闸"读；persona.json 没有消费者，真正
+#: 生效的是 persona.md；plugins.json 的读者排 M1-10，现在改了暂不生效）。
+#: 注意：前端展示时已加「已保存。」前缀（settings.html），这里不重复写。
+_APPLY_NOTES = {
+    "config": "模型/网关/唤醒词等改动下一句对话即生效",
+    "secrets": "密钥改动下一句对话即生效",
+    "platforms": "web.port 需重启 main.py；QQ 的地址/密钥下次开闸（关→开）生效",
+    "persona": "真正生效的是 data/config/persona.md，改完下一句对话即生效",
+    "plugins": "插件启停面板排在 M1-10，当前改动暂不生效",
+}
+
+
 async def _guard_post_json(
     request: Request,
 ) -> tuple[dict | None, JSONResponse | None]:
@@ -204,7 +218,7 @@ def build_settings_routes(
             except Exception as exc:  # 磁盘满/权限——返回错误而不是 500 堆栈
                 return _bad(f"写入失败：{exc}", code=500)
             return JSONResponse({"ok": True, "domain": domain, "changed": changed,
-                                 "note": "部分配置需重启 main.py 后生效"})
+                                 "note": _APPLY_NOTES.get(domain, "改动已写入配置")})
 
     return register
 

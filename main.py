@@ -257,11 +257,11 @@ async def serve_forever(
     """常驻前台循环：每个适配器一个 recv 协程（§18.5「每平台 1 个 recv 协程」）。
 
     取消（Ctrl-C / 进程退出）时整体停下并向上抛 CancelledError。
-    """
-    # 唤醒策略启动时读一次（§19-13：配置改动重启生效，不做热加载）。
-    # 传 None 时 handle_message 会自己按消息读——测试/裸调用能走，但服务里用的是这份。
-    policy = wake if wake is not None else load_wake_policy()
 
+    唤醒策略**不在这里缓存**（PR3 热重载）：wake=None（服务默认）时
+    handle_message 每条消息现读策略文件——改完唤醒词下一句就生效。
+    显式传了策略（测试/想钉住行为）就用传进来的那份。
+    """
     async def pump(adapter: AdapterBase) -> None:
         while True:
             message = await adapter.recv()
@@ -270,7 +270,7 @@ async def serve_forever(
             try:
                 await handle_message(
                     message, router=router, store=store, bot=bot, bus=bus,
-                    wake=policy,
+                    wake=wake,
                 )
             except Exception:
                 logger.exception("处理消息时发生未预期的错误，已跳过这条")
@@ -415,8 +415,10 @@ async def _serve() -> None:
 
         # 第 9 步：把适配器挂成常驻任务，然后前台循环等消息。
         # 每个 start() 各自兜异常（_safe_start）——某平台端口被占不该拖垮别的平台。
+        # 这行只是**启动快照**（给人看的）：真正生效的策略不缓存，
+        # 每条消息现读（热重载）——改完唤醒词不用等重启。
         wake = load_wake_policy()
-        logger.info("唤醒策略：范围=%s 关键词=%s", wake.scope, list(wake.words) or "（无）")
+        logger.info("唤醒策略（启动快照）：范围=%s 关键词=%s", wake.scope, list(wake.words) or "（无）")
         await asyncio.gather(
             *(_safe_start(a) for a in adapters),
             serve_forever(adapters, router=router, store=store, bot=bot, bus=bus,

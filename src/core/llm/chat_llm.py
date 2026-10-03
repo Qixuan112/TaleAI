@@ -17,6 +17,7 @@ import json
 import logging
 import re
 from pathlib import Path
+from typing import Callable
 
 from openai import AsyncOpenAI
 
@@ -143,7 +144,18 @@ def _history_turn_for_model(entry: dict) -> dict:
 
 
 class ChatLLM:
-    """对话机器人：组装上下文并调用真实 LLM。"""
+    """对话机器人：组装上下文并调用真实 LLM。
+
+    配置热重载（PR3）：run_loop 每轮开头经 settings_reader 读一次配置快照，
+    有变化就搬进活实例——这是对 §19-13「改动重启生效」的**用户拍板偏离**
+    （设置页改完不想重启）。类属性默认 None = 不重载：测试用
+    `ChatLLM.__new__(ChatLLM)` 造裸实例（不跑 __init__）走的正是这条，
+    读到类属性 None 直接跳过，永远不会在没装部件的实例上炸。
+    """
+
+    #: 配置整快照读取器：() -> {"llm": {...}, "api_key": "..."}。None = 不重载。
+    #: 类属性兜底 + __init__ 赋实例属性遮盖——`__new__` 裸实例拿到的就是 None。
+    settings_reader: "Callable[[], dict] | None" = None
 
     def __init__(self, bus: EventBus | None = None) -> None:
         # 读配置（服务商 / 模型 / key）
@@ -152,6 +164,8 @@ class ChatLLM:
         llm = cfg.get("llm", {})
         # base_url / model 是用户配置（默认值为空），缺了就没法工作。
         # 这里主动校验并给出可操作的提示，而不是等 provider 返回难懂的 403。
+        # （这是**启动**的 fail-fast，保留不变；热重载路径读空值则回退上次，
+        #   见 _refresh_config——启动即错要当场暴露，运行中变错不该炸回合。）
         self.base_url: str = llm.get("base_url", "")
         self.model: str = llm.get("model", "")
         if not self.base_url or not self.model:
@@ -160,6 +174,9 @@ class ChatLLM:
                 " 服务商网关地址（以 /v1 结尾）与模型名。"
             )
         self.api_key: str = secrets.get("llm", {}).get("api_key", "")
+        # 热重载的读配置入口（PR3）：读 config + secrets 两个域，返回整快照。
+        # 赋成实例属性 = 遮盖类属性的 None，真实例每轮 run_loop 都会过一遍它。
+        self.settings_reader = self._read_settings_snapshot
 
         # 人格（M0-03 第一半：塔利）
         self.persona = Persona()
@@ -187,6 +204,69 @@ class ChatLLM:
         self._current_session_id: str = ""
         # 兜底文案（§19-2：模型什么都没说时发它；写在 prompts 里可改）
         self.fallback_text = _load_fallback_text()
+
+    # ---------- 配置热重载（PR3） ----------
+
+    @staticmethod
+    def _read_settings_snapshot() -> dict:
+        """读配置整快照：{"llm": {...}, "api_key": "..."}（config + secrets 两个域）。
+
+        读失败（坏 JSON/文件被写坏）直接抛——由 _refresh_config 兜住回退。
+        返回**整快照**而不是逐字段查询：热重载的原子单位是"一份配置"，
+        半份新半份旧比全旧更糟。
+        """
+        cfg = Config.load("config")
+        secrets = Config.load("secrets")
+        return {
+            "llm": dict(cfg.get("llm", {})),
+            "api_key": str(secrets.get("llm", {}).get("api_key", "")),
+        }
+
+    async def _refresh_config(self) -> None:
+        """把改过的配置搬进活实例（热重载）。run_loop 每轮开头调，失败绝不抛。
+
+        - reader 为 None（裸实例/测试）→ 什么都不做；
+        - 读取/校验失败（坏 JSON、base_url 或 model 为空）→ 记 warning，
+          整快照保持**上一次成功**那份——绝不逐字段半量应用；
+        - 成功 → 全量应用：model / 历史窗口 / 轮次上限每轮取新值；
+          client 仅在 (base_url, api_key) 变化时重建（旧 client 尽力 close，
+          关不掉只记 debug，不挡热重载）。
+        """
+        reader = self.settings_reader
+        if reader is None:
+            return
+        try:
+            snapshot = reader()
+            llm = dict(snapshot.get("llm") or {})
+            base_url = str(llm.get("base_url") or "")
+            model = str(llm.get("model") or "")
+            api_key = str(snapshot.get("api_key") or "")
+            keep = int(llm.get("history_keep_messages", 10))
+            extra = int(llm.get("history_lookback_extra", 5))
+            steps = int(llm.get("max_agent_steps", 3))
+            if not base_url or not model:
+                raise ValueError("llm.base_url / llm.model 为空")
+        except Exception:
+            logger.warning(
+                "配置热重载读取失败，沿用上一次的配置（改完下一句再试）",
+                exc_info=True,
+            )
+            return
+
+        if (base_url, api_key) != (self.base_url, self.api_key):
+            old = self.client
+            self.base_url = base_url
+            self.api_key = api_key
+            self.client = AsyncOpenAI(base_url=base_url, api_key=api_key)
+            try:
+                await old.close()
+            except Exception:
+                # 旧连接池随 GC 回收，关不掉不算错误——别为它挡下热重载
+                logger.debug("关闭旧 LLM 客户端失败（忽略）", exc_info=True)
+        self.model = model
+        self.history_keep_messages = keep
+        self.history_lookback_extra = extra
+        self.max_agent_steps = steps
 
     def assemble_messages(
         self, user_question: str, history: list[dict[str, str]] | None = None,
@@ -370,6 +450,9 @@ class ChatLLM:
         session = SessionContext(
             session_id=session_id, session_type=session_type, owner=owner
         )
+        # 配置热重载（PR3）：每轮开头把改过的配置搬进来（model/密钥/窗口）。
+        # 失败只会记 warning 并沿用上次成功的配置——热重载失败不该让对话失败。
+        await self._refresh_config()
         messages = self.assemble_messages(user_question, history, session=session,
                                           images=images, quoted=quoted)
         tools = self.registry.tool_schemas()
