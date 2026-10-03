@@ -82,7 +82,7 @@ _CONFIG_FIELDS = (
         help="人格自称。改这里只改配置；人格正文的人格名在 persona.md",
     ),
     FieldSpec(
-        key="wake.words", label="唤醒词", type="text", default="塔利",
+        key="wake.words", label="唤醒词", type="text", default=["塔利"],
         help="多个用逗号分隔。群聊里正文含任一唤醒词（或 @ 塔利）才算在叫它",
     ),
     FieldSpec(

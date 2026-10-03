@@ -285,9 +285,14 @@ def _build(bus: EventBus | None = None):
     # 注入读历史的回调：连上时补发历史，否则刷新页面后是空的（M0 验收⑤）。
     # 用回调而不是把 store 塞给适配器——适配器不该认识 SessionStore（§22 import 单向）。
     # clearer 同理：网页上「清空本次历史」要能删库，但适配器只认「(session_id)->删了几条」。
+    # extra_routes 同理：设置读写要碰 Config，但适配器不该认识它——main 把
+    # 「注册 /api/settings/* 的业务路由」这件事当回调递进去（UX-01 的注入缝）。
+    from core.config.api import build_settings_routes
+
     ws_adapter = WebSocketAdapter(
         bus=bus, port=_resolve_ws_port(), history_provider=store.history,
         clearer=store.clear, stream=stream,
+        extra_routes=build_settings_routes(),
     )
     registry.register(ws_adapter)
     adapters = [ws_adapter]
