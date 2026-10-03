@@ -7,6 +7,7 @@
 """
 
 import base64
+import logging
 import os
 import sys
 from pathlib import Path
@@ -82,6 +83,25 @@ def test_cleanup_deletes_oldest_when_over_limit(tmp_path, monkeypatch):
 
 def test_cleanup_noop_when_under_limit(tmp_path):
     assert image_store.cleanup(tmp_path) == 0
+
+
+def test_cleanup_warns_when_protected_file_alone_over_limit(
+    tmp_path, monkeypatch, caplog
+):
+    """极端场景：被保护的那张图单独就超阈值 → 删不动，要留 warning 而非静默。
+
+    正常路径触发不了（上传上限 5MB ≪ 100MB）；绕过上传直接塞大文件才会
+    （评审 rev2）。行为不变：protect 绝不删。
+    """
+    monkeypatch.setattr(image_store, "MAX_DIR_BYTES", 1000)
+    data = image_store._MAGIC[0][0] + b"X" * 2000  # 单张 2008 字节 > 阈值
+    name = image_store.save_bytes(data, base=tmp_path)
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="core.image_store"):
+        removed = image_store.cleanup(tmp_path, protect=name)
+    assert removed == 0
+    assert (tmp_path / name).exists()  # 被保护的不许删
+    assert any("仍超限" in r.getMessage() for r in caplog.records)
 
 
 # ================= store：attachments =================

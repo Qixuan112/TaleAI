@@ -296,16 +296,19 @@ class SessionStore:
         用的；没有分条信息的行（user、旧行）**不加这个键**，让消费方对称降级
         （无 parts 就走旧的纯文本路径）。
         """
-        columns = "role, content, parts_json" if with_parts else "role, content"
+        # 列名二选一定好完整 SQL——不用 f-string 拼（列名虽是固定常量、本无
+        # 注入面，但这种写法容易在别处被复制成真注入；评审 rev2 建议显式化）。
+        if with_parts:
+            base = "SELECT role, content, parts_json FROM messages WHERE session_id = ?"
+        else:
+            base = "SELECT role, content FROM messages WHERE session_id = ?"
         if limit is None:
             rows = self._db.execute(
-                f"SELECT {columns} FROM messages WHERE session_id = ? ORDER BY seq",
-                (session_id,),
+                base + " ORDER BY seq", (session_id,)
             ).fetchall()
         else:
             rows = self._db.execute(
-                f"SELECT {columns} FROM messages WHERE session_id = ? ORDER BY seq DESC LIMIT ?",
-                (session_id, limit),
+                base + " ORDER BY seq DESC LIMIT ?", (session_id, limit)
             ).fetchall()
             rows = list(reversed(rows))
 

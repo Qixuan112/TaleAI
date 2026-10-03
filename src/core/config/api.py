@@ -21,6 +21,7 @@
 
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -146,8 +147,12 @@ def build_settings_routes(
                 return _bad("需要 Content-Type: application/json", code=415)
             origin = request.headers.get("origin")
             if origin:
-                host = origin.split("://", 1)[-1].split("/", 1)[0]
-                if host != request.headers.get("host"):
+                # 与 web/adapter.py 的 _origin_allowed 同一套解析（urlparse 取
+                # hostname、剥掉端口）。此前这里用 split 保留端口、那边剥端口，
+                # 两处口径不一致——反向代理重写 Host、或端口书写形态不同时会
+                # 误判（评审 rev2）。
+                host_header = request.headers.get("host") or ""
+                if urlparse(origin).hostname != urlparse(f"//{host_header}").hostname:
                     return _bad("跨站请求被拒", code=403)
             # 2) 畸形 JSON 不能变成 500——归成 400。
             try:

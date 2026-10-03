@@ -173,6 +173,19 @@ def test_save_rejects_cross_origin(client):
     assert r.status_code == 403
 
 
+def test_save_allows_origin_port_variant(client):
+    """Origin 与 Host 只有端口书写形态差异（同主机名）→ 放行。
+
+    反向代理会重写 Host（可能去掉端口）；解析口径必须与 web/adapter.py 的
+    _origin_allowed 对齐——两边都 urlparse 取 hostname（评审 rev2）。
+    真正的跨站仍被拒（上一条用例）。
+    """
+    r = client.post("/api/settings/values",
+                    json={"domain": "config", "values": {"bot.name": "塔利"}},
+                    headers={"Origin": "http://testserver:8000"})
+    assert r.status_code == 200
+
+
 def test_save_rejects_malformed_json_as_400_not_500(client):
     """畸形 JSON 归 400，不是 500 堆栈。"""
     r = client.post("/api/settings/values",
