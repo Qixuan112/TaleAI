@@ -17,7 +17,7 @@ import pytest
 from core.adapter.base import AdapterBase, Message, Reply
 from core.adapter.registry import AdapterRegistry
 from core.adapter.router import Router, UnknownPlatformError
-from core.bus.event_bus import EventBus
+from core.event_bus import EventBus
 
 
 # ---------- 假适配器：只实现抽象方法，不碰网络 ----------

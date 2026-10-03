@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from fastapi.testclient import TestClient
 
 from core.adapter.web.adapter import WebAdapter
-from core.bus.event_bus import EventBus
+from core.event_bus import EventBus
 from core.log_stream import LogStream
 
 

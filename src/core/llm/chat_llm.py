@@ -21,7 +21,7 @@ from pathlib import Path
 from openai import AsyncOpenAI
 
 from core.adapter.base import Reply
-from core.bus.event_bus import EventBus
+from core.event_bus import EventBus
 from core.config.loader import Config
 from core.executor import ToolCall, ToolExecutor
 from core.image_store import to_data_uri

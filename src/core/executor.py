@@ -14,7 +14,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from core.bus.event_bus import EventBus
+from core.event_bus import EventBus
 from core.plugin.guard import PermissionGuard
 from core.plugin.registry import PluginRegistry
 

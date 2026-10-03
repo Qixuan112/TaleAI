@@ -21,7 +21,7 @@ from core.adapter import qq as qq_pkg
 from core.adapter.base import Reply
 from core.adapter.qq import adapter as qq_adapter_mod
 from core.adapter.qq.adapter import QQAdapter
-from core.bus.event_bus import EventBus
+from core.event_bus import EventBus
 
 
 @pytest.fixture(autouse=True)

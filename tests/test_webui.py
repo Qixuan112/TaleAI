@@ -19,7 +19,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from core.adapter.web.adapter import WEBUI_DIR, WebAdapter
-from core.bus.event_bus import EventBus
+from core.event_bus import EventBus
 
 
 @pytest.fixture(autouse=True)

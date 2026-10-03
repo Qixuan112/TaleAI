@@ -111,7 +111,7 @@ def test_group_message_records_kind_group(tmp_path):
     from core.adapter.base import AdapterBase, Reply
     from core.adapter.registry import AdapterRegistry
     from core.adapter.router import Router
-    from core.bus.event_bus import EventBus
+    from core.event_bus import EventBus
 
     class FakeAdapter(AdapterBase):
         name = "qq"
@@ -152,7 +152,7 @@ def test_private_message_records_kind_private(tmp_path):
     from core.adapter.base import AdapterBase, Reply
     from core.adapter.registry import AdapterRegistry
     from core.adapter.router import Router
-    from core.bus.event_bus import EventBus
+    from core.event_bus import EventBus
 
     class FakeAdapter(AdapterBase):
         name = "qq"

@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 from core.adapter.base import AdapterBase, Message, Reply
 from core.adapter.registry import AdapterRegistry
 from core.adapter.router import Router, UnknownPlatformError
-from core.bus.event_bus import EventBus
+from core.event_bus import EventBus
 from core.llm.chat_llm import ChatLLM
 from core.llm.persona_llm.base import USER_PERSONA_PATH, ensure_user_persona
 from core.log import Logging

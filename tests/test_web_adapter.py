@@ -18,7 +18,7 @@ from fastapi.testclient import TestClient
 
 from core.adapter.base import Reply
 from core.adapter.web.adapter import DEFAULT_SESSION_ID, WebAdapter
-from core.bus.event_bus import EventBus
+from core.event_bus import EventBus
 
 
 @pytest.fixture(autouse=True)

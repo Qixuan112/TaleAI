@@ -32,7 +32,7 @@ from fastapi.responses import RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from core.adapter.base import AdapterBase, Message, Reply
-from core.bus.event_bus import EventBus
+from core.event_bus import EventBus
 from core.image_store import MAX_IMAGES_PER_MESSAGE
 from core.log_stream import LogStream
 

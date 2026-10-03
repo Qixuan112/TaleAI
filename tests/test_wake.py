@@ -16,7 +16,7 @@ import pytest
 from core.adapter.base import AdapterBase, Message, Reply
 from core.adapter.registry import AdapterRegistry
 from core.adapter.router import Router
-from core.bus.event_bus import EventBus
+from core.event_bus import EventBus
 from core.session.store import SessionStore
 from core.wake import WakePolicy, load_wake_policy
 

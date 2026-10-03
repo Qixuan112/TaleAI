@@ -19,7 +19,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
 
-from core.bus.event_bus import EventBus
+from core.event_bus import EventBus
 
 
 @dataclass

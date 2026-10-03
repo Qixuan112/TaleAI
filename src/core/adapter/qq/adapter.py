@@ -28,7 +28,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from core.adapter.base import AdapterBase, Message, Reply
 from core.adapter.pacing import typing_delay
 from core.adapter.qq.protocol import build_send_action, parse_event
-from core.bus.event_bus import EventBus
+from core.event_bus import EventBus
 from core.image_store import MAX_IMAGES_PER_MESSAGE, download as download_image
 
 logger = logging.getLogger(__name__)
