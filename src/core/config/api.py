@@ -87,6 +87,38 @@ def _coerce(raw: Any, spec) -> Any:
     return str(raw) if not isinstance(raw, str) else raw
 
 
+def _bad(msg: str, code: int = 400) -> JSONResponse:
+    return JSONResponse({"ok": False, "error": msg}, status_code=code)
+
+
+async def _guard_post_json(
+    request: Request,
+) -> tuple[dict | None, JSONResponse | None]:
+    """POST JSON 接口的公共防线：Content-Type / CSRF（Origin 与 Host 同源）/
+    畸形 JSON / 非对象体。settings 与 platforms 两组写接口共用一份——两处
+    各写一份迟早漂移（CSRF 口径一处变、一处没变就是漏洞）。
+
+    Origin 与 Host 都用 urlparse 取 hostname（剥端口），与 web/adapter.py 的
+    `_origin_allowed` 同口径（评审 rev2）。返回 (body, None) 或 (None, 错误响应)。
+    """
+    ctype = (request.headers.get("content-type") or "").split(";")[0].strip()
+    if ctype != "application/json":
+        return None, _bad("需要 Content-Type: application/json", code=415)
+    origin = request.headers.get("origin")
+    if origin:
+        host_header = request.headers.get("host") or ""
+        if urlparse(origin).hostname != urlparse(f"//{host_header}").hostname:
+            return None, _bad("跨站请求被拒", code=403)
+    # 畸形 JSON 不能变成 500——归成 400。
+    try:
+        body = await request.json()
+    except Exception:
+        return None, _bad("请求体不是合法 JSON")
+    if not isinstance(body, dict):
+        return None, _bad("请求体必须是 JSON 对象")
+    return body, None
+
+
 def build_settings_routes(
     config_dir: Path | None = None,
 ) -> Callable[[FastAPI], None]:
@@ -97,9 +129,6 @@ def build_settings_routes(
 
     def _load(domain: str) -> Config:
         return Config.load(domain) if config_dir is None else Config.load(domain, config_dir / DOMAINS[domain])
-
-    def _bad(msg: str, code: int = 400) -> JSONResponse:
-        return JSONResponse({"ok": False, "error": msg}, status_code=code)
 
     def register(app: FastAPI) -> None:
         @app.get("/api/settings/fields")
@@ -140,27 +169,11 @@ def build_settings_routes(
 
         @app.post("/api/settings/values")
         async def save(request: Request) -> JSONResponse:
-            # 1) CSRF 防护：跨站表单 POST 也带 Cookie 但不带正确 Content-Type 之外的
-            #    东西——这里双重把关：要求 application/json + Origin 与 Host 同源。
-            ctype = (request.headers.get("content-type") or "").split(";")[0].strip()
-            if ctype != "application/json":
-                return _bad("需要 Content-Type: application/json", code=415)
-            origin = request.headers.get("origin")
-            if origin:
-                # 与 web/adapter.py 的 _origin_allowed 同一套解析（urlparse 取
-                # hostname、剥掉端口）。此前这里用 split 保留端口、那边剥端口，
-                # 两处口径不一致——反向代理重写 Host、或端口书写形态不同时会
-                # 误判（评审 rev2）。
-                host_header = request.headers.get("host") or ""
-                if urlparse(origin).hostname != urlparse(f"//{host_header}").hostname:
-                    return _bad("跨站请求被拒", code=403)
-            # 2) 畸形 JSON 不能变成 500——归成 400。
-            try:
-                body = await request.json()
-            except Exception:
-                return _bad("请求体不是合法 JSON")
-            if not isinstance(body, dict):
-                return _bad("请求体必须是 JSON 对象")
+            # 1) 防线（Content-Type / CSRF / 畸形 JSON / 非对象体）见
+            #    _guard_post_json——与 platforms 写接口共用一份，防漂移。
+            body, err = await _guard_post_json(request)
+            if err is not None:
+                return err
 
             domain = str(body.get("domain") or "config")
             incoming = body.get("values") or {}
@@ -192,5 +205,56 @@ def build_settings_routes(
                 return _bad(f"写入失败：{exc}", code=500)
             return JSONResponse({"ok": True, "domain": domain, "changed": changed,
                                  "note": "部分配置需重启 main.py 后生效"})
+
+    return register
+
+
+def build_platforms_routes(
+    service, config_dir: Path | None = None,
+) -> Callable[[FastAPI], None]:
+    """QQ 平台开关的路由（设置页"空气开关"的控制面）。
+
+    service 由 main 注入——本模块不认识 QQService 的实现，只按约定调用
+    start()/stop()/status()（鸭子接口，同 history_provider 那套；§22 import
+    单向：config 层不 import adapter 层）。config_dir 只在测试里用。
+
+    "失败"的语义：启动失败是**正常运行态**（端口被占/网关没起来），不是请求
+    错误——返回 200 + state=failed + detail，让页面渲染告示条；只有配置写
+    不进去才是 500。
+    """
+
+    def _load() -> Config:
+        return (
+            Config.load("platforms") if config_dir is None
+            else Config.load("platforms", config_dir / DOMAINS["platforms"])
+        )
+
+    def register(app: FastAPI) -> None:
+        @app.get("/api/platforms/qq")
+        async def qq_status() -> JSONResponse:
+            cfg = _load()
+            enabled = bool(_get_dotted(cfg.data, "qq.enabled", False))
+            return JSONResponse({"ok": True, "enabled": enabled, **service.status()})
+
+        @app.post("/api/platforms/qq")
+        async def qq_set(request: Request) -> JSONResponse:
+            body, err = await _guard_post_json(request)
+            if err is not None:
+                return err
+            enabled = body.get("enabled")
+            if not isinstance(enabled, bool):
+                return _bad("enabled 必须是 true / false")
+
+            # 先落配置（用户意图），再致动——顺序反了的话：服务起来了但配置
+            # 没写上，下次重启又回到旧意图。配置写失败直接 500，不假装成功。
+            cfg = _load()
+            _set_dotted(cfg.data, "qq.enabled", enabled)
+            try:
+                cfg.save()
+            except Exception as exc:
+                return _bad(f"配置写入失败：{exc}", code=500)
+
+            status = await (service.start() if enabled else service.stop())
+            return JSONResponse({"ok": True, "enabled": enabled, **status})
 
     return register
