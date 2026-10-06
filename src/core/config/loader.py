@@ -13,7 +13,7 @@ import os
 import tempfile
 from pathlib import Path
 
-from core.config.default import DEFAULT_CONFIG
+from src.core.config.default import DEFAULT_CONFIG
 
 # 默认配置目录：项目根下的 data/config/
 # parents[0]=config/ parents[1]=core/ parents[2]=src/ parents[3]=项目根
