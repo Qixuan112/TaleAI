@@ -424,6 +424,17 @@ function enqueueRender(data) {
 
 async function renderReply(data) {
   var msgs = data.messages || [];
+  // 重置回执（后端命令层 &newtale 的结果）：先抹掉页面上的旧气泡，再回执。
+  // 跟后端"忘掉线之前"保持一致——记忆和界面看到的是同一段。不回执出气泡
+  // （走系统提示），跟清空按钮的观感统一。
+  if (data.stop_reason === "reset") {
+    if (pending) { pending.remove(); pending = null; }
+    messagesEl.innerHTML = "";
+    sendEl.disabled = false;
+    inputEl.focus();
+    (msgs.length ? msgs : ["已重置"]).forEach(function (m) { addSystemNote(m); });
+    return;
+  }
   // 回复到了：先把"在想…"占位换成第一条，并立刻恢复输入——
   // 别让用户等所有气泡都敲完才轮到打字（真人聊天也不会这么等）
   if (pending) { pending.remove(); pending = null; }
@@ -593,9 +604,11 @@ fileEl.addEventListener("change", function () {
 });
 
 // ---- 聊天框命令（& 或 / 开头）------------------------------------------------
-// 内置命令：&newtale 重置会话；&help 显示说明。都**不进模型**、不出气泡。
+// &newtale 重置（忘掉前情、库保留）**由后端处理**——不再走前端本地拦截。
+// 为什么改到后端：语义是"忘掉"（划重置线，不删库），这需要读写会话存储；
+// 而且 QQ 也走同一条路，一份逻辑两个平台一致（前端再拦一次就是第二份实现，
+// 迟早漂移）。前端只留 &help 这类纯本地说明。
 // 前缀 & 与 / 都认——& 跟正文不撞，/ 是大家更熟的习惯，两个都放行省得记。
-var RESET_CMD = "&newtale";
 var HELP_CMD = "&help";
 
 // 把一行文字归一成命令名（去掉首尾空白、去掉一个前缀、转小写）。
@@ -606,11 +619,10 @@ function commandOf(text) {
   return t.slice(1).toLowerCase();
 }
 
-function isResetCommand(text) { return commandOf(text) === "newtale"; }
 function isHelpCommand(text) { return commandOf(text) === "help"; }
 
 function showHelp() {
-  addSystemNote("&newtale 或 /newtale —— 重置本次会话（会话号不变）");
+  addSystemNote("&newtale 或 /newtale —— 重置本次会话（忘掉前面聊的，重新开始）");
   addSystemNote("&help 或 /help —— 显示本说明");
   addSystemNote("也可以直接粘贴图片发给我看；Enter 发送，Shift+Enter 换行");
 }
@@ -633,14 +645,8 @@ function send() {
     return;
   }
 
-  // &newtale 是命令不是聊天：重置会话，不发给模型、不出现气泡。
-  // 单次即清（跟核弹钮的两下确认不同）——用户是**主动敲的命令**，不是误触。
-  if (isResetCommand(text) && !images.length) {
-    inputEl.value = "";
-    ws.send(JSON.stringify({ action: "clear", session_id: SID }));
-    return;
-  }
-
+  // 注意：&newtale **不再在这里拦截**——当普通消息发出去，由后端命令层统一
+  // 处理（忘掉前情、不删库，与 QQ 同一条路）。这里只需照常发帧、等回执。
   addBubble(text, "me", images);
   ws.send(JSON.stringify({ content: text, session_id: SID, images: images }));
   inputEl.value = "";

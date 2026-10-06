@@ -140,16 +140,20 @@ async def handle_message(
 
     # 命令层（跨平台，判定在 core/commands.py）：&newtale 重置本会话。
     #
+    # **语义是"忘掉"，不是"抹掉"**（用户拍板 2026-10-06）：只把重置点推到当前
+    # 最新——库里的消息全留着（当记忆素材，M1 提炼要用），但后续读历史
+    # （喂模型 / 网页回放）都只看重置点之后的。真删库是核弹按钮（store.clear），
+    # 两个动作区分开：命令 = 忘掉前情，按钮 = 清空落地。
+    #
     # 位置讲究：
     # ① 放在唤醒门之后——群里没叫它就不该有任何动作，"重置"也一样
     #    （否则谁在群里丢一句命令都能抹掉塔利的上下文）；
-    # ② 放在收即存之前——命令不是聊天内容：不落库（重置完历史必须是**干净**
-    #    的，命令和回执都不能留），回执发完即弃。
-    # ③ 带图不算命令——与 WebUI 前端拦截的判定一致（那是"发图说话"，
-    #    不是"下命令"）。
+    # ② 放在收即存之前——命令不是聊天内容：不落库、不调模型。
+    # ③ 带图不算命令——那是"发图说话"，与 WebUI 前端拦截的判定一致。
     if is_reset_command(message.content) and not message.images:
         try:
-            deleted = store.clear(session_id)
+            forgotten = store.visible_count(session_id)   # 划线的"忘掉"条数
+            store.mark_reset(session_id)
         except Exception:
             logger.exception("重置会话失败：session=%s", session_id)
             await _safe_send(adapter, Reply(
@@ -158,11 +162,15 @@ async def handle_message(
                 stop_reason="error",
             ))
             return None
-        text = (f"好，刚才那 {deleted} 条都翻篇了——我们重新开始吧~"
-                if deleted else "本来就是新会话，我们从这儿开始吧~")
-        reply = Reply(session_id=session_id, messages=[text])
+        text = (f"好，刚才那 {forgotten} 条就当我没看见——我们重新开始吧~"
+                if forgotten else "本来就是新会话，我们从这儿开始吧~")
+        # stop_reason="reset" 是给前端的信号：这轮回执伴随"忘掉前情"，
+        # 前端据此把页面上的旧气泡一并抹掉（跟后端"看不见线之前的"保持一致）。
+        # 不是什么新的结束原因类别，只是让回执能自报身份。
+        reply = Reply(session_id=session_id, messages=[text], stop_reason="reset")
         await _safe_send(adapter, reply)
-        logger.info("重置命令：session=%s 清掉 %d 条", session_id, deleted)
+        logger.info("重置命令（忘掉前情，库保留）：session=%s 划到第 %d 条",
+                    session_id, store.reset_seq(session_id))
         return reply
 
     # 会话行必须先存在（messages 有外键指过来）。幂等。

@@ -86,6 +86,11 @@ CREATE TABLE IF NOT EXISTS session_cursors(
 # 一个探测 + 补列就够了，没必要为一行列号上 Alembic 那种重器。
 _ADDED_COLUMNS = {
     "messages": {"parts_json": "TEXT", "attachments": "TEXT", "quoted": "TEXT"},
+    # 重置点（&newtale）：这条会话"从哪条起算开始"。读历史只取 seq 大于它的行。
+    # 为什么放在 sessions 上而不是删 messages：&newtale 是"忘掉"不是"抹掉"——
+    # 库里消息留作记忆素材（M1 提炼用），只是本轮对话不再看到它们。
+    # 0（默认）= 没重置过，全部可见。
+    "sessions": {"reset_seq": "INTEGER NOT NULL DEFAULT 0"},
 }
 
 
@@ -234,6 +239,38 @@ class SessionStore:
 
     # ---------- 消息 ----------
 
+    def reset_seq(self, session_id: str) -> int:
+        """这条会话的重置点：读历史时只取 seq 大于它的行。未重置过返回 0。"""
+        row = self._db.execute(
+            "SELECT reset_seq FROM sessions WHERE id = ?", (session_id,)
+        ).fetchone()
+        return int(row["reset_seq"]) if row is not None and row["reset_seq"] else 0
+
+    def mark_reset(self, session_id: str) -> int:
+        """把重置点推到当前最新（&newtale 的"忘掉"）。
+
+        返回推到了哪个 seq。**只动重置点、不删消息**——库里留作记忆素材，
+        只是后续读历史（喂模型 / 网页回放）都看不见它之前的了。
+        与 clear() 的区别：clear 是真删（核弹按钮），mark_reset 是划条线。
+        """
+        with self._lock:
+            row = self._db.execute(
+                "SELECT COALESCE(MAX(seq), 0) AS m FROM messages WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+            top = int(row["m"])
+            # 会话行可能还没建（理论上 ensure_session 先跑过，防御性 UPSERT）
+            self._db.execute(
+                """
+                INSERT INTO sessions(id, platform, kind, owner, reset_seq, created_at, last_active)
+                VALUES(?, 'web', 'private', 'local', ?, 0, 0)
+                ON CONFLICT(id) DO UPDATE SET reset_seq = excluded.reset_seq
+                """,
+                (session_id, top),
+            )
+            self._db.commit()
+            return top
+
     def append(
         self,
         session_id: str,
@@ -337,20 +374,20 @@ class SessionStore:
         为什么默认关：history() 的形状被多处测试与调用方钉死，
         媒体信息是「谁需要谁开」的 opt-in——和 with_parts 一个道理。
         """
-        # 列名二选一定好完整 SQL——不用 f-string 拼（列名虽是固定常量、本无
-        # 注入面，但这种写法容易在别处被复制成真注入；评审 rev2 建议显式化）。
+        # 读历史一律只看重置点之后（&newtale 划的那条线）——模型看不到线之前，
+        # 网页也看不到，两边一致（不然"忘了"和"还看得见"会打架）。
+        rp = self.reset_seq(session_id)
         if with_parts or with_media:
             base = ("SELECT role, content, parts_json, attachments, quoted, reply_to "
-                    "FROM messages WHERE session_id = ?")
+                    "FROM messages WHERE session_id = ? AND seq > ?")
         else:
-            base = "SELECT role, content FROM messages WHERE session_id = ?"
+            base = "SELECT role, content FROM messages WHERE session_id = ? AND seq > ?"
+        args = (session_id, rp)
         if limit is None:
-            rows = self._db.execute(
-                base + " ORDER BY seq", (session_id,)
-            ).fetchall()
+            rows = self._db.execute(base + " ORDER BY seq", args).fetchall()
         else:
             rows = self._db.execute(
-                base + " ORDER BY seq DESC LIMIT ?", (session_id, limit)
+                base + " ORDER BY seq DESC LIMIT ?", (*args, limit)
             ).fetchall()
             rows = list(reversed(rows))
 
@@ -383,11 +420,13 @@ class SessionStore:
         给记忆的文本契约（不含附件/parts），网页回放要的是"带图带分条"。
         （history() 现在也能用 with_media=True 取媒体，但那是给模型装配用的、
         键名与降级规则都不同；别把两条路并成一条。）
+
+        同样只看重置点之后——网页回放与"塔利看到的"保持一致。
         """
         rows = self._db.execute(
             "SELECT role, content, attachments, parts_json, quoted, reply_to "
-            "FROM messages WHERE session_id = ? ORDER BY seq",
-            (session_id,),
+            "FROM messages WHERE session_id = ? AND seq > ? ORDER BY seq",
+            (session_id, self.reset_seq(session_id)),
         ).fetchall()
         out = []
         for r in rows:
@@ -423,8 +462,21 @@ class SessionStore:
         return [dict(r) for r in rows]
 
     def count(self, session_id: str) -> int:
+        """这条会话**库里实际有多少条**（含重置点之前被"忘掉"的）。
+
+        这是库的真相、不是"塔利还记得几条"——重置（&newtale）只划条线不删行，
+        所以重置后它**不为零**。要看"还记得几条"用 visible_count()。
+        """
         row = self._db.execute(
             "SELECT COUNT(*) AS n FROM messages WHERE session_id = ?", (session_id,)
+        ).fetchone()
+        return int(row["n"])
+
+    def visible_count(self, session_id: str) -> int:
+        """这条会话**塔利还记得几条**（重置点之后的行数）。网页回执与测试用这个。"""
+        row = self._db.execute(
+            "SELECT COUNT(*) AS n FROM messages WHERE session_id = ? AND seq > ?",
+            (session_id, self.reset_seq(session_id)),
         ).fetchone()
         return int(row["n"])
 
