@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 from core.adapter.base import AdapterBase, Message, Reply
 from core.adapter.registry import AdapterRegistry
 from core.adapter.router import Router, UnknownPlatformError
+from core.commands import is_reset_command
 from core.event_bus import EventBus
 from core.llm.chat_llm import ChatLLM
 from core.llm.persona_llm.base import (
@@ -136,6 +137,33 @@ async def handle_message(
     except UnknownPlatformError:
         logger.warning("消息来自未登记的平台 %r，已忽略", message.platform)
         return None
+
+    # 命令层（跨平台，判定在 core/commands.py）：&newtale 重置本会话。
+    #
+    # 位置讲究：
+    # ① 放在唤醒门之后——群里没叫它就不该有任何动作，"重置"也一样
+    #    （否则谁在群里丢一句命令都能抹掉塔利的上下文）；
+    # ② 放在收即存之前——命令不是聊天内容：不落库（重置完历史必须是**干净**
+    #    的，命令和回执都不能留），回执发完即弃。
+    # ③ 带图不算命令——与 WebUI 前端拦截的判定一致（那是"发图说话"，
+    #    不是"下命令"）。
+    if is_reset_command(message.content) and not message.images:
+        try:
+            deleted = store.clear(session_id)
+        except Exception:
+            logger.exception("重置会话失败：session=%s", session_id)
+            await _safe_send(adapter, Reply(
+                session_id=session_id,
+                messages=["……（重置没成功，你稍后再试一次？）"],
+                stop_reason="error",
+            ))
+            return None
+        text = (f"好，刚才那 {deleted} 条都翻篇了——我们重新开始吧~"
+                if deleted else "本来就是新会话，我们从这儿开始吧~")
+        reply = Reply(session_id=session_id, messages=[text])
+        await _safe_send(adapter, reply)
+        logger.info("重置命令：session=%s 清掉 %d 条", session_id, deleted)
+        return reply
 
     # 会话行必须先存在（messages 有外键指过来）。幂等。
     # kind 必须跟着消息走——此前漏传，导致群聊会话在库里被记成 private
