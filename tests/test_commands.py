@@ -127,8 +127,12 @@ def qq_msg(content, *, session_id=SID, session_type="private", addressed=None,
     )
 
 
-async def test_private_reset_clears_and_replies(wiring):
-    """QQ 私聊 &newtale：清掉历史、回执给用户、不调模型。"""
+async def test_private_reset_forgets_but_keeps_rows(wiring):
+    """QQ 私聊 &newtale：**忘掉前情但不删库**、回执给用户、不调模型。
+
+    用户拍板 2026-10-06 的语义：库里的消息留作记忆素材，只划一条重置线——
+    所以 count（库里实际条数）不变，visible_count（塔利还记得几条）归零。
+    """
     main, adapter, router, bot, store, bus = wiring
     store.ensure_session(SID, platform="qq", kind="private", owner="u1")
     store.append(SID, "user", "旧事一")
@@ -137,15 +141,17 @@ async def test_private_reset_clears_and_replies(wiring):
     reply = await main.handle_message(
         qq_msg("&newtale"), router=router, store=store, bot=bot, bus=bus,
     )
-    assert store.count(SID) == 0              # 清干净
+    assert store.count(SID) == 2              # 库保留（没删）
+    assert store.visible_count(SID) == 0      # 但塔利忘了
+    assert store.history(SID) == []           # 读历史拿不到线之前的
     assert bot.calls == []                    # 没调模型
     assert reply is not None and reply.messages  # 有回执
     assert adapter.sent and adapter.sent[-1].messages == reply.messages
-    assert "2" in reply.messages[0]           # 回执里报了条数
+    assert "2" in reply.messages[0]           # 回执报的是"忘掉几条"
 
 
-async def test_reset_leaves_no_trace(wiring):
-    """命令本身与回执都不落库——重置完历史必须是干净的（下次对话无前情）。"""
+async def test_reset_does_not_store_the_command(wiring):
+    """命令本身与回执都不落库——线之后的库是干净的（下次对话无前情）。"""
     main, adapter, router, bot, store, bus = wiring
     store.ensure_session(SID, platform="qq", kind="private", owner="u1")
     store.append(SID, "user", "旧事")
@@ -153,7 +159,26 @@ async def test_reset_leaves_no_trace(wiring):
     await main.handle_message(
         qq_msg("&newtale"), router=router, store=store, bot=bot, bus=bus,
     )
-    assert store.count(SID) == 0              # 既没留命令，也没留回执
+    assert store.count(SID) == 1              # 只有那条"旧事"，命令与回执都没落
+    assert store.visible_count(SID) == 0
+
+
+async def test_reset_then_new_message_starts_fresh(wiring):
+    """重置后新来一句：历史里看不到前情（正是"忘掉"的意义）。"""
+    main, adapter, router, bot, store, bus = wiring
+    store.ensure_session(SID, platform="qq", kind="private", owner="u1")
+    store.append(SID, "user", "我叫小王")
+    store.append(SID, "assistant", "记住啦")
+
+    await main.handle_message(
+        qq_msg("&newtale"), router=router, store=store, bot=bot, bus=bus,
+    )
+    await main.handle_message(
+        qq_msg("我叫什么", session_id=SID), router=router, store=store, bot=bot, bus=bus,
+    )
+    # 模型这轮拿到的 history 里不该有"我叫小王"
+    _q, hist, _sid = bot.calls[-1]
+    assert all("小王" not in m["content"] for m in hist)
 
 
 async def test_reset_on_empty_session_is_graceful(wiring):
@@ -186,6 +211,7 @@ async def test_group_reset_requires_wake(wiring):
     )
     assert reply is None
     assert store.count(GSID) == 2   # 旧事 + 这条命令（按未唤醒落库）
+    assert store.visible_count(GSID) == 2   # 没划重置线
     assert bot.calls == []
 
 
@@ -202,7 +228,8 @@ async def test_group_reset_works_when_addressed(wiring):
         qq_msg("&newtale", session_id=GSID, session_type="group", addressed=True),
         router=router, store=store, bot=bot, bus=bus, wake=policy,
     )
-    assert store.count(GSID) == 0
+    assert store.count(GSID) == 1           # 库保留
+    assert store.visible_count(GSID) == 0   # 但忘了
     assert reply is not None and adapter.sent
 
 
@@ -229,19 +256,21 @@ async def test_non_reset_command_goes_to_model(wiring):
     assert bot.calls, "&help 不该被后端吞掉"
 
 
-# ================= 前后端一致性 =================
+# ================= 前端配合（判定已归后端，前端不再拦）=================
 
 
-def test_frontend_and_backend_agree_on_command_name():
-    """两处并存（前端快路径 + 后端正路），命令名必须一致——从页面提取验证。
+def test_frontend_does_not_reimplement_reset():
+    """前端不该再有第二份 &newtale 判定——判定归后端一份，防漂移。
 
-    漂移的后果：WebUI 里能重置、QQ 里不能（或反过来）——正是这次修的坑。
+    2026-10-06 改：重置从前端本地拦截改为后端统一处理（QQ 也走同一条路）。
+    前端若还留着 isResetCommand/RESET_CMD，说明两份实现并存的旧状态又回来了。
     """
     from core.adapter.web.adapter import WEBUI_DIR
 
     page = (WEBUI_DIR / "index.html").read_text(encoding="utf-8")
-    m = re.search(r'RESET_CMD\s*=\s*"([^"]+)"', page)
-    assert m, "前端 index.html 里找不到 RESET_CMD"
-    assert is_reset_command(m.group(1)), (
-        f"前端命令 {m.group(1)!r} 后端不认——两处漂移了"
-    )
+    assert not re.search(r"function\s+isResetCommand", page), \
+        "前端不该再有自己的 isResetCommand"
+    assert not re.search(r'RESET_CMD\s*=', page), \
+        "前端不该再有 RESET_CMD 常量"
+    # 但帮助文案里要告诉用户有这个命令
+    assert "&newtale" in page, "&help 里应提到 &newtale"

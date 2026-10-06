@@ -138,26 +138,34 @@ def test_nav_does_not_introduce_framework_to_index_or_logs():
             assert m not in low, f"{name} 引了不该有的东西：{m!r}"
 
 
-# ---------- &newtale 重置会话（UX-02）----------
+# ---------- &newtale 重置会话（UX-02；语义 2026-10-06 改为后端处理）----------
 
 
-def test_newtale_command_defined():
-    """&newtale 命令常量与判定函数存在。"""
-    page = _page("index.html")
-    assert "&newtale" in page, "页面没有 &newtale 命令"
-    assert re.search(r"function\s+isResetCommand", page), "没有命令判定函数"
+def test_newtale_not_intercepted_locally():
+    """&newtale **不在前端拦截**——当普通消息发给后端统一处理。
 
-
-def test_newtale_sends_clear_action_not_content():
-    """&newtale 必须复用 clear 控制帧（action=clear），而不是当聊天发 content。
-
-    这是"会话号保持不变"的关键：clear 删消息、留会话行，session_id 不动。
+    2026-10-06 改：重置语义变成"忘掉前情、库保留"（要读写会话存储），
+    而且 QQ 也走同一条路。前端再拦一次就是第二份实现，迟早漂移。
     """
     page = _page("index.html")
-    # 命令分支里发的是 action=clear
-    assert re.search(r'action\s*:\s*"clear"', page), "&newtale 没有发 clear 帧"
-    # 判定函数在 send 里被用上（否则命令形同虚设）
-    assert re.search(r"isResetCommand\s*\(", page), "判定函数没被调用"
+    assert "&newtale" in page, "帮助/提示里应提到 &newtale"
+    assert not re.search(r"function\s+isResetCommand", page), \
+        "不该再有前端 isResetCommand（判定已归后端）"
+
+
+def test_newtale_no_longer_sends_clear_frame():
+    """&newtale 不再发 clear 控制帧——那是核弹按钮（真删库）的动作，语义不同。"""
+    page = _page("index.html")
+    # 只剩核弹按钮那条 clear；&newtale 那条不该再有
+    clears = re.findall(r'action\s*:\s*"clear"', page)
+    assert len(clears) == 1, f"应只剩核弹按钮一处 clear 帧，实有 {len(clears)}"
+
+
+def test_frontend_handles_reset_receipt():
+    """前端认得后端的重置回执（stop_reason="reset"）：抹旧气泡 + 系统提示。"""
+    page = _page("index.html")
+    assert re.search(r'stop_reason\s*===\s*"reset"', page), \
+        "没处理 stop_reason=reset 的回执"
 
 
 def test_newtale_mentioned_in_placeholder():
