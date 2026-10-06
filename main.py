@@ -32,6 +32,7 @@ from core.llm.persona_llm.base import (
 )
 from core.log import Logging
 from core.log_stream import LogStream, StreamLogHandler
+from core.memory import EventLog, record_event
 from core.plugin.registry import PluginRegistry
 from core.session.store import SessionStore
 from core.wake import WakePolicy, load_wake_policy
@@ -81,6 +82,7 @@ async def handle_message(
     store: SessionStore,
     bot,
     bus: EventBus,
+    eventlog: EventLog,
     wake: "WakePolicy | None" = None,
 ) -> Reply | None:
     """处理一条入站消息：§18.1 第 3~9 步。
@@ -194,6 +196,15 @@ async def handle_message(
                      reply_to=message.reply_to,
                      attachments=list(message.images or []) or None,
                      quoted=message.quoted or None)
+        # M1-02：记录 message.received 事件（先落盘、后 publish）
+        record_event(
+            bus=bus,
+            eventlog=eventlog,
+            event_type="message.received",
+            session_id=session_id,
+            owner=message.owner,
+            data={"content": message.content, "role": "user"},
+        )
     except Exception:
         # 用户消息存不下来，这轮干脆不调模型——免得用户以为已经发出去了。
         # 但**要回一帧**：否则前端收不到任何东西，永远停在"塔利在想…"
@@ -245,14 +256,17 @@ async def handle_message(
     # 第 8 步：发回
     await _safe_send(adapter, reply)
 
-    # 第 9 步：旁路喊一声"已发送"（订阅者：on_message_sent 钩子、memory 触发）
-    bus.publish(
-        "message.sent",
+    # 第 9 步：记录 message.sent 事件（M1-02：先落盘、后 publish）
+    record_event(
+        bus=bus,
+        eventlog=eventlog,
+        event_type="message.sent",
         session_id=session_id,
-        platform=message.platform,
-        messages=list(reply.messages),
-        tool_calls_made=reply.tool_calls_made,
-        stop_reason=reply.stop_reason,
+        owner=message.owner,
+        data={
+            "messages": list(reply.messages),
+            "stop_reason": reply.stop_reason,
+        },
     )
     return reply
 
@@ -300,6 +314,7 @@ async def serve_forever(
     store: SessionStore,
     bot,
     bus: EventBus,
+    eventlog: EventLog,
     wake: "WakePolicy | None" = None,
 ) -> None:
     """常驻前台循环：每个适配器一个 recv 协程（§18.5「每平台 1 个 recv 协程」）。
@@ -318,7 +333,7 @@ async def serve_forever(
             try:
                 await handle_message(
                     message, router=router, store=store, bot=bot, bus=bus,
-                    wake=wake,
+                    eventlog=eventlog, wake=wake,
                 )
             except Exception:
                 logger.exception("处理消息时发生未预期的错误，已跳过这条")
@@ -371,10 +386,13 @@ def _qq_enabled() -> bool:
 
 
 def _build(bus: EventBus | None = None):
-    """按 §18.1 组装出 (store, router, bot, bus, adapters, stream, qq_service)。"""
+    """按 §18.1 组装出 (store, router, bot, bus, adapters, stream, eventlog, qq_service)。"""
     bus = bus if bus is not None else EventBus()
     store = SessionStore().open()  # 第 3 步：SQLite + WAL + 建表
     PluginRegistry().scan()  # 第 4 步：扫内置 + data/plugin 注册工具
+
+    # M1-02：初始化 EventLog（记忆事件落盘）
+    eventlog = EventLog(Path(__file__).parent / "data" / "memory" / "events.jsonl")
 
     from core.adapter.web.adapter import WebAdapter
 
@@ -435,12 +453,12 @@ def _build(bus: EventBus | None = None):
 
     router = Router(registry)
 
-    return store, router, bot, bus, adapters, stream, qq_service
+    return store, router, bot, bus, adapters, stream, eventlog, qq_service
 
 
 async def _serve() -> None:
     """默认跑法：起 WebSocket 服务（WebUI 聊天 + /logs 日志页）。"""
-    store, router, bot, bus, adapters, stream, qq_service = _build()
+    store, router, bot, bus, adapters, stream, eventlog, qq_service = _build()
     # 日志镜像：把 root 的每条日志也推到 /logs 页。**单独挂**而不是塞进
     # Logging.init()——init 的契约是「只加一个文件 handler」（test_log.py 钉着），
     # 破了它日志会重复落盘。服务退出时摘掉，保持干净。
@@ -470,7 +488,7 @@ async def _serve() -> None:
         await asyncio.gather(
             *(_safe_start(a) for a in adapters),
             serve_forever(adapters, router=router, store=store, bot=bot, bus=bus,
-                          wake=wake),
+                          eventlog=eventlog, wake=wake),
         )
     finally:
         root.removeHandler(mirror)
