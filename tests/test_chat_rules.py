@@ -12,6 +12,7 @@
 
 import os
 import sys
+from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -245,6 +246,22 @@ def test_ensure_user_rules_creates_parent_dirs(tmp_path):
     nested = tmp_path / "a" / "b"
     ensure_user_rules(nested)
     assert (nested / "global.md").is_file()
+
+
+def test_seed_race_never_overwrites_concurrently_created_file(tmp_path, monkeypatch):
+    """exists 快查与写入之间的竞态窗口：窗口内出现的文件绝不被骨架覆盖。
+
+    复刻 CodeRabbit 2026-10-06 审查指出的 check-then-write 竞态：
+    让 exists 恒回 False 模拟"检查时文件还没出现"，而文件实际已存在——
+    修复前的"检查后直接 write"会截断覆盖它，独占创建（"x"）会尊重它。
+    """
+    rules = tmp_path / "rules"
+    rules.mkdir(parents=True)
+    (rules / "group.md").write_text(GROUP_RULE, encoding="utf-8")
+    monkeypatch.setattr(Path, "exists", lambda self: False)
+    created = ensure_user_rules(rules)
+    assert (rules / "group.md").read_text(encoding="utf-8") == GROUP_RULE
+    assert len(created) == 2  # 只落真正缺的两份（global/private）
 
 
 # ---------- F 接线：装配/端到端真的用上了规则 ----------

@@ -176,11 +176,20 @@ def _seed_if_missing(path: Path, skeleton: str) -> bool:
     """目标文件不存在就落一份骨架（内容 skeleton）。返回是否真的创建了。
 
     幂等，且**绝不覆盖**已存在的文件——那是用户的东西（§13）。
+    写入用**独占创建**（"x" 模式）：exists 快查与写入之间不留窗口——并发的
+    另一个启动进程或用户编辑器恰在这一瞬创建了文件，也不会被骨架截断覆盖
+    （CodeRabbit 2026-10-06 审查指出的 check-then-write 竞态；persona 与
+    rules 两处的旧写法一并关掉）。快查在前只为常见路径少一次异常开销，
+    正确性靠 "x"，不靠它。
     """
     if path.exists():
         return False
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(skeleton, encoding="utf-8")
+    try:
+        with path.open("x", encoding="utf-8") as f:
+            f.write(skeleton)
+    except FileExistsError:
+        return False  # 检查与打开之间被别人抢先创建了——尊重它
     return True
 
 
