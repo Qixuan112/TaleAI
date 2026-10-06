@@ -263,7 +263,8 @@ class FakeAdapter(AdapterBase):
 
 class FakeBot:
     async def run_loop(self, user_question, history=None, session_id="",
-                       *, session_type="", owner="", images=None, quoted=""):
+                       *, session_type="", owner="", images=None, quoted="",
+                       quoted_images=None):
         return Reply(session_id=session_id, messages=["好呀~"])
 
 

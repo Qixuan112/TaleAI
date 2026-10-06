@@ -21,6 +21,7 @@ SnowLuma 负责（它的 `reconnectIntervalMs`）。少一半代码。
 
 import asyncio
 import logging
+import time
 import uuid
 from collections import OrderedDict
 
@@ -28,9 +29,19 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 from core.adapter.base import AdapterBase, Message, Reply
 from core.adapter.pacing import typing_delay
-from core.adapter.qq.protocol import build_send_action, extract_message_text, parse_event
+from core.adapter.qq.protocol import (
+    build_send_action,
+    extract_image_urls,
+    extract_message_text,
+    has_image,
+    parse_event,
+)
 from core.event_bus import EventBus
-from core.image_store import MAX_IMAGES_PER_MESSAGE, download as download_image
+from core.image_store import (
+    IMAGE_PLACEHOLDER,
+    MAX_IMAGES_PER_MESSAGE,
+    download as download_image,
+)
 
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
@@ -43,6 +54,11 @@ _API_TIMEOUT = 2.0
 
 #: 引用内容截断长度——只给模型看个大意，全文既费 token 也没必要
 QUOTED_MAX_CHARS = 200
+
+#: 一条消息**全部**图片下载的总预算（秒）：被引用的图与当前消息的图共享它，
+#: 到点就停手、剩下的当无图。为什么要有盖子：原先是每张图各 10 秒、最多
+#: 4+4 张，最坏能把这条消息的投递拖掉一分多钟（图片是投递前下载的）。
+_IMAGE_DOWNLOAD_BUDGET = 15.0
 
 
 class QQAdapter(AdapterBase):
@@ -309,23 +325,38 @@ class QQAdapter(AdapterBase):
 
         拆出来是为了让引用消息能走 create_task（见 _on_frame 的死锁说明）。
         """
+        # 这一条消息全部取图动作共享的截止时刻：引用图 + 当前消息的图都在
+        # 这个预算里，到点就停手（见 _IMAGE_DOWNLOAD_BUDGET）。
+        deadline = time.monotonic() + _IMAGE_DOWNLOAD_BUDGET
+
         # 引用内容：reply 段只有被引用消息的 ID，内容要再发一个 get_msg 拉。
-        # 个别实现在 reply 段里内联了原文——有就直接用，省一次往返。
-        # 拉不到（超时/断开/被撤回）降级为空串：只回正文仍然成立。
-        if message.reply_to and not message.quoted:
-            message.quoted = await self._fetch_quoted(message.reply_to)
+        # **总是拉**，哪怕 reply 段内联了原文也不短路——内联的只有文字，
+        # 被引用消息里的图只有 get_msg 才看得到（原先的短路让"引用图片"
+        # 永远不可见）。拉到的比内联更全就用拉到的；拉不到才留着内联的。
+        if message.reply_to:
+            text, quoted_urls = await self._fetch_quoted(message.reply_to)
+            if text:
+                message.quoted = text
+            if quoted_urls:
+                message.quoted_images = await asyncio.to_thread(
+                    self._download_images, quoted_urls, deadline
+                )
 
         # 图片（UX-08）：把 OneBot 给的图片 URL 下载落地成文件名，填进 images。
         # 下载是阻塞 I/O，用 to_thread 丢给线程池，别卡住事件循环（其它消息
         # 还在等着收）。失败/超时当无图——网络是外部依赖，不能拖垮链路。
+        # 顺序：上面先下**引用图**（那正是"他在说哪张图"的答案），这里再下
+        # 当前消息的图。两者共享同一个 deadline，顺序只决定预算不够时谁被
+        # 舍弃；装配侧的张数上限反过来——当前消息的图优先占位。
         urls = (message.meta or {}).get("image_urls") or []
         if urls:
-            files = await asyncio.to_thread(self._download_images, urls)
+            files = await asyncio.to_thread(self._download_images, urls, deadline)
             message.images = files[:MAX_IMAGES_PER_MESSAGE]
 
         # 纯图片/表情等无文本：**不再丢弃**——图就是内容（UX-08）。
-        # 只有"既无文字又无图"才真的空（理论上不会发生，防御性）。
-        if not message.content and not message.images:
+        # 只引用不说话（quote-only）同理：被引用的那句话就是他要说的事。
+        # 只有"文字、图、引用"三样都没有才真的空（防御性）。
+        if not message.content and not message.images and not message.quoted:
             return
 
         # "有没有 @ 我"是**平台事实**（得知道 bot_id），只有这里判得了。
@@ -377,10 +408,16 @@ class QQAdapter(AdapterBase):
         data = resp.get("data")
         return data if isinstance(data, dict) else None
 
-    async def _fetch_quoted(self, message_id: str) -> str:
-        """拉被引用消息的文本内容（get_msg），截断到 QUOTED_MAX_CHARS。
+    async def _fetch_quoted(self, message_id: str) -> tuple[str, list[str]]:
+        """拉被引用消息的内容（get_msg）→ (文本, 图片 URL 列表)。
 
-        任何失败（超时/断开/被撤回/权限）都返回空串——引用内容只是锦上
+        文本截断到 QUOTED_MAX_CHARS；**消息里有图就标出 [图片]**——纯图引用
+        的文字部分是空的，不标就成了空串，装配侧连"他引用了一条消息"都不会
+        写给模型（修过的 bug：引用图片完全不可见）。图能不能下载是另一回事：
+        下载不了的（比如只给本地文件名）也该留这个占位。
+        下载交给调用方（本函数只解析，不落地）。
+
+        任何失败（超时/断开/被撤回/权限）都返回 ("", [])——引用内容只是锦上
         添花，"拿不到就只回正文"必须仍然成立，绝不能让一次 get_msg 失败
         把整条消息卡死或丢掉。
         """
@@ -390,8 +427,12 @@ class QQAdapter(AdapterBase):
             mid = message_id  # 非纯数字就原样传，后端认不认是它的事
         data = await self._call_api("get_msg", {"message_id": mid})
         if not isinstance(data, dict):
-            return ""
-        return extract_message_text(data.get("message")).strip()[:QUOTED_MAX_CHARS]
+            return "", []
+        msg = data.get("message")
+        text = extract_message_text(msg).strip()
+        if has_image(msg):
+            text = f"{text} {IMAGE_PLACEHOLDER}".strip()
+        return text[:QUOTED_MAX_CHARS], extract_image_urls(msg)
 
     def _cancel_pending(self) -> None:
         """取消所有在途的 API 请求（断连时调）。见 endpoint finally 的说明。"""
@@ -400,11 +441,25 @@ class QQAdapter(AdapterBase):
                 fut.cancel()
         self._pending.clear()
 
-    def _download_images(self, urls: list[str]) -> list[str]:
-        """下载一组图片 URL → 文件名列表（失败/非图跳过）。阻塞，由 to_thread 调。"""
+    def _download_images(
+        self, urls: list[str], deadline: float | None = None
+    ) -> list[str]:
+        """下载一组图片 URL → 文件名列表（失败/非图跳过）。阻塞，由 to_thread 调。
+
+        deadline 是**绝对时刻**（time.monotonic() 基准），一条消息的引用图和
+        当前图共享同一个它：每张图只准用「剩下多少预算」，预算耗尽就一张都不
+        再下。这样最坏等待是有界的，而不是 4 张 × 10 秒往下滚。
+        """
         names: list[str] = []
         for url in urls:
-            name = download_image(url)
+            timeout = 10.0
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    logger.debug("图片下载预算用完，跳过剩余 %d 张", len(urls) - len(names))
+                    break
+                timeout = min(timeout, remaining)
+            name = download_image(url, timeout=timeout)
             if name:
                 names.append(name)
             if len(names) >= MAX_IMAGES_PER_MESSAGE:

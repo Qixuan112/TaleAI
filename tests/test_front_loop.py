@@ -53,11 +53,14 @@ class FakeBot:
         self.on_call = on_call
         self.calls: list[tuple] = []
         self.quoted_seen: list[str] = []
+        self.quoted_images_seen: list[list[str]] = []
 
     async def run_loop(self, user_question, history=None, session_id="",
-                       *, session_type="", owner="", images=None, quoted=""):
+                       *, session_type="", owner="", images=None, quoted="",
+                       quoted_images=None):
         self.calls.append((user_question, list(history or []), session_id))
         self.quoted_seen.append(quoted)
+        self.quoted_images_seen.append(list(quoted_images or []))
         if self.on_call:
             self.on_call(user_question, history, session_id)
         if self.error:
@@ -181,19 +184,42 @@ async def test_model_receives_pre_write_history_not_the_new_question_twice(store
     assert history[-1]["content"] == "早呀~"
 
 
-async def test_reply_to_persisted_and_quoted_passed_to_model(wiring):
-    """引用回复（PR2）：reply_to（引用了哪条）落库；quoted（内容）只喂模型。
+async def test_reply_to_and_quoted_persisted_and_passed_to_model(wiring):
+    """引用回复：reply_to（引用了哪条）与 quoted（原话）都落库，也都喂模型。
 
-    分工不能混：reply_to 是消息的结构化事实（§18.3 的列），落库；
-    quoted 是"这次请求的对话背景"（同 reminder 的 persist=False 精神），
-    不落库——否则历史里每轮都拖着一截引用原文，上下文会滚雪球。
+    落库口径是对设计文档 v4.13「quoted 只进本次请求、不落库」的**刻意偏离**
+    （用户拍板）：不落库的话，下一轮读历史时模型就再也看不见"他在回哪句话"。
+    正文仍不受污染——quoted 有自己的列，不混进 content。
     """
     call, adapter, bot, store, bus = wiring
     await call(make_message("这句怎么样", reply_to="m0", quoted="被引用的原话"))
     row = store.messages(SID)[0]
     assert row["reply_to"] == "m0"
-    assert row["content"] == "这句怎么样"      # quoted 不进正文
-    assert bot.quoted_seen == ["被引用的原话"]  # 且确实传给了模型
+    assert row["content"] == "这句怎么样"        # quoted 不混进正文
+    assert row["quoted"] == "被引用的原话"        # 但有自己的列（本轮新增）
+    assert bot.quoted_seen == ["被引用的原话"]    # 且确实传给了模型
+
+
+async def test_quoted_images_passed_to_model(wiring):
+    """被引用消息里的图（文件名）一路传到 run_loop——少了这一步，
+    "引用图片"在装配时就没有图可发，等于没修。"""
+    call, adapter, bot, store, bus = wiring
+    await call(make_message("这啥", quoted="[图片]", quoted_images=["q.png"]))
+    assert bot.quoted_images_seen == [["q.png"]]
+
+
+async def test_history_is_read_with_media(wiring):
+    """读历史时开着 with_media：窗口里的图/引用才有机会渲染成占位。
+
+    不开的话 history() 只给 {role, content}，纯图消息在装配侧就是一条空行
+    ——用户实测"模型看不到我刚发的图"的一半原因在这里。
+    """
+    call, adapter, bot, store, bus = wiring
+    store.append(SID, "user", "", attachments=["a.png"], quoted="原话")
+    await call(make_message("刚那张图里是什么"))
+    history = bot.calls[0][1]  # FakeBot 记下的 (user_question, history, session_id)
+    assert history[-1]["attachments"] == ["a.png"]
+    assert history[-1]["quoted"] == "原话"
 
 
 async def test_blank_message_is_ignored(store, clean_bus):

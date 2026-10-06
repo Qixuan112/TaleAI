@@ -19,6 +19,7 @@ import pytest
 from core.adapter.qq.protocol import (
     build_send_action,
     extract_message_text,
+    has_image,
     parse_event,
     parse_session_id,
 )
@@ -278,6 +279,29 @@ def test_extract_message_text_string_strips_cq():
 def test_extract_message_text_malformed_gives_empty():
     assert extract_message_text(None) == ""
     assert extract_message_text(123) == ""
+
+
+# ---------- has_image（"有没有图"这个事实，与"下不下载得到"无关）----------
+
+
+def test_has_image_array_and_string_forms():
+    assert has_image([{"type": "image", "data": {"url": "https://x/a.png"}}]) is True
+    assert has_image([{"type": "text", "data": {"text": "看图"}}]) is False
+    # 字符串形态：CQ 码里有没有 image
+    assert has_image("[CQ:image,file=x.jpg]") is True
+    assert has_image("[CQ:face,id=1]你好") is False
+
+
+def test_has_image_true_even_without_downloadable_url():
+    """只给本地文件名（没有 http URL，下载不了）也算"有图"——
+    "这里有过一张图"这个事实不该因为下载不了就消失（渲染 [图片] 占位）。"""
+    assert has_image([{"type": "image", "data": {"file": "abc.jpg"}}]) is True
+
+
+def test_has_image_malformed_is_false():
+    assert has_image(None) is False
+    assert has_image(123) is False
+    assert has_image([None, "x", {"no": "type"}]) is False
 
 
 # ---------- 信封分流：事件 vs API 响应 vs 其他 ----------

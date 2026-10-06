@@ -203,6 +203,108 @@ def test_old_db_without_parts_column_is_upgraded(tmp_path):
     s.close()
 
 
+# ---------- quoted 列与 with_media（引用可见性修复） ----------
+
+
+def test_quoted_roundtrip_via_history(store):
+    """append(quoted=...) 落库，history(with_media=True) 原样带回来。
+
+    为什么要落库：引用原文只在发生的那一轮进请求的话，下一轮读历史时模型
+    就再也看不见"他在回哪句话"——用户实测的正是这个症状。
+    """
+    store.append("s1", "user", "就这个", reply_to="42", quoted="被引用的原话")
+    assert store.history("s1", with_media=True) == [
+        {"role": "user", "content": "就这个",
+         "quoted": "被引用的原话", "reply_to": "42"}
+    ]
+
+
+def test_quoted_empty_is_stored_as_null(store):
+    """空串归一为 NULL：没有引用就是"没有"，读侧只看真值，不必区分两种空。"""
+    store.append("s1", "user", "你好", quoted="")
+    assert store.messages("s1")[0]["quoted"] is None
+
+
+def test_history_with_media_returns_attachments(store):
+    """图片文件名经 with_media 带回来——装配侧靠它渲染 [图片] 占位。"""
+    store.append("s1", "user", "", attachments=["a.png", "b.jpg"])
+    assert store.history("s1", with_media=True)[0]["attachments"] == ["a.png", "b.jpg"]
+
+
+def test_history_with_media_omits_keys_when_absent(store):
+    """没有媒体/引用的行**不加**这三个键——消费方按"缺键 = 没有"对称降级。"""
+    store.append("s1", "user", "你好")
+    got = store.history("s1", with_media=True)
+    assert got == [{"role": "user", "content": "你好"}]
+
+
+def test_history_default_shape_unchanged_with_media_rows(store):
+    """老契约优先：默认 history() 即使行里有图有引用，也只给 role/content。"""
+    store.append("s1", "user", "", attachments=["a.png"], quoted="原话", reply_to="9")
+    assert store.history("s1") == [{"role": "user", "content": ""}]
+    assert all(set(e) == {"role", "content"} for e in store.history("s1"))
+
+
+def test_quoted_survives_reopen(tmp_path):
+    """引用原文跨进程重启存活——要撑到下一轮（乃至更久）读历史时还在。"""
+    db = tmp_path / "s.db"
+    a = SessionStore(db).open()
+    a.ensure_session("s1")
+    a.append("s1", "user", "就这个", quoted="被引用的原话")
+    a.close()
+
+    b = SessionStore(db).open()
+    assert b.history("s1", with_media=True)[0]["quoted"] == "被引用的原话"
+    b.close()
+
+
+def test_history_with_attachments_includes_quote_keys(store):
+    """WebUI 回放帧顺带带上引用两键（纯增量，前端现在忽略未知键）。"""
+    store.append("s1", "user", "就这个", quoted="原话", reply_to="9")
+    frame = store.history_with_attachments("s1")[0]
+    assert frame["quoted"] == "原话"
+    assert frame["reply_to"] == "9"
+
+
+def test_old_db_without_quoted_column_is_upgraded(tmp_path):
+    """旧库（本次加 quoted 列之前建的）打开时自动补列，旧行优雅降级。
+
+    模拟的正是用户机器上那个库的形状：已有 parts_json/attachments、缺 quoted。
+    """
+    db = tmp_path / "old.db"
+    conn = sqlite3.connect(db)
+    conn.executescript("""
+        CREATE TABLE sessions(
+          id TEXT PRIMARY KEY, platform TEXT NOT NULL, kind TEXT NOT NULL,
+          owner TEXT NOT NULL, title TEXT, created_at REAL NOT NULL,
+          last_active REAL NOT NULL);
+        CREATE TABLE messages(
+          seq INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
+          role TEXT NOT NULL, content TEXT NOT NULL, mentions TEXT,
+          reply_to TEXT, tool_json TEXT, parts_json TEXT, attachments TEXT,
+          ts REAL NOT NULL);
+    """)
+    conn.execute("INSERT INTO sessions VALUES('s1','qq','group','u1',NULL,0,0)")
+    conn.execute(
+        "INSERT INTO messages(session_id, role, content, reply_to, ts) "
+        "VALUES('s1','user','老消息','7',0)"
+    )
+    conn.commit()
+    conn.close()
+
+    s = SessionStore(db).open()  # 应自动 ALTER 补列，不炸
+    cols = [r["name"] for r in s._db.execute("PRAGMA table_info(messages)").fetchall()]
+    assert "quoted" in cols
+    # 旧行只落了 ID、没有原文：带 reply_to 键、不带 quoted 键（装配侧渲染短行）
+    assert s.history("s1", with_media=True) == [
+        {"role": "user", "content": "老消息", "reply_to": "7"}
+    ]
+    # 新写入立刻能用新列
+    s.append("s1", "user", "新消息", quoted="新引用")
+    assert s.history("s1", with_media=True)[-1]["quoted"] == "新引用"
+    s.close()
+
+
 # ---------- 不变量 2：tool_json 挂在 assistant 行上 ----------
 
 

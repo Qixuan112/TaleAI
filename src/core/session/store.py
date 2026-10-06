@@ -66,6 +66,8 @@ CREATE TABLE IF NOT EXISTS messages(
   -- assistant 分条数组(JSON);NULL=旧行/单条,读时回落启发式。content 仍是权威纯文本
   parts_json TEXT,
   attachments TEXT,                 -- 图片文件名 JSON 数组（UX-06 多模态）
+  -- 被引用消息的原文（QQ 引用回复时适配器 get_msg 拉出来的那截文本）
+  quoted TEXT,
   ts REAL NOT NULL
 );
 
@@ -83,7 +85,7 @@ CREATE TABLE IF NOT EXISTS session_cursors(
 # 是纯元数据操作（不重写表、不复制数据），旧行自动为 NULL，瞬时完成——
 # 一个探测 + 补列就够了，没必要为一行列号上 Alembic 那种重器。
 _ADDED_COLUMNS = {
-    "messages": {"parts_json": "TEXT", "attachments": "TEXT"},
+    "messages": {"parts_json": "TEXT", "attachments": "TEXT", "quoted": "TEXT"},
 }
 
 
@@ -102,6 +104,28 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
         for column, ddl_type in columns.items():
             if column not in existing:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type}")
+
+
+def _media_keys(row: sqlite3.Row) -> dict:
+    """从一行消息里取出媒体/引用 sidecar 键（history(with_media=True) 用）。
+
+    三个键各自独立、**有才给**：没有图/没有引用的行根本不出现这些键，
+    消费方按"缺键 = 没有"对称降级（与 parts 同款约定）。解析坏数据一律
+    当"没有"——一行的脏数据不该把整段历史炸掉。
+    """
+    out: dict = {}
+    if row["attachments"]:
+        try:
+            imgs = json.loads(row["attachments"])
+        except (ValueError, TypeError):
+            imgs = None
+        if isinstance(imgs, list) and imgs:
+            out["attachments"] = imgs
+    if row["quoted"]:
+        out["quoted"] = row["quoted"]
+    if row["reply_to"]:
+        out["reply_to"] = row["reply_to"]
+    return out
 
 
 class SessionStore:
@@ -221,6 +245,7 @@ class SessionStore:
         mentions: list[str] | None = None,
         reply_to: str | None = None,
         attachments: list[str] | None = None,
+        quoted: str | None = None,
         ts: float | None = None,
     ) -> int:
         """追加一条消息，返回它的 seq。
@@ -235,6 +260,12 @@ class SessionStore:
 
         attachments：本条消息带的图片文件名列表（UX-06）。只存文件名，
         图片本体在 data/temp/img/（可回收）——两者生命周期不同，不混存。
+
+        quoted：被引用消息的原文（QQ 引用回复）。**这里是对 §18.3 v4.13 的
+        刻意的用户拍板偏离**：原约定是「quoted 只进本次请求、不落库」，但那样
+        一来，下一轮读历史时模型就再也看不见"他在回哪句话"——用户实测的正是
+        这个症状。落库后由装配侧（chat_llm._history_turn_for_model）渲染，
+        转义责任也在那边，与用户正文同级。
         """
         if role not in {"user", "assistant", "system"}:
             raise ValueError(f"非法的 role: {role!r}")
@@ -260,22 +291,26 @@ class SessionStore:
             parts_json = None
         if attachments is not None:
             attachments = json.dumps(attachments, ensure_ascii=False)
+        # 空串归一为 NULL：没有引用就是"没有"，不该在库里留一条空记录
+        # （读侧判断因此只需看真值，不必区分 "" 和 None 两种"没有"）。
+        quoted = quoted or None
 
         with self._lock:
             cur = self._db.execute(
                 """
                 INSERT INTO messages(session_id, role, content, mentions, reply_to,
-                                     tool_json, parts_json, attachments, ts)
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                     tool_json, parts_json, attachments, quoted, ts)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (session_id, role, content, mentions, reply_to, tool_json,
-                 parts_json, attachments, time.time() if ts is None else ts),
+                 parts_json, attachments, quoted, time.time() if ts is None else ts),
             )
             self._db.commit()
             return int(cur.lastrowid)
 
     def history(
-        self, session_id: str, limit: int | None = None, *, with_parts: bool = False
+        self, session_id: str, limit: int | None = None, *,
+        with_parts: bool = False, with_media: bool = False,
     ) -> list[dict]:
         """读回历史，按时间正序（旧 → 新）。
 
@@ -295,11 +330,18 @@ class SessionStore:
         `"parts": [...]`——这是给「补 <msg> 标签喂模型」和「WebUI 分气泡」
         用的；没有分条信息的行（user、旧行）**不加这个键**，让消费方对称降级
         （无 parts 就走旧的纯文本路径）。
+
+        with_media：默认 False。True 时额外带上 `attachments`（图片文件名）、
+        `quoted`（被引用原文）、`reply_to`（被引用消息 ID）三个键，
+        同样**有才给键**（没有媒体/没有引用的行不加），消费方对称降级。
+        为什么默认关：history() 的形状被多处测试与调用方钉死，
+        媒体信息是「谁需要谁开」的 opt-in——和 with_parts 一个道理。
         """
         # 列名二选一定好完整 SQL——不用 f-string 拼（列名虽是固定常量、本无
         # 注入面，但这种写法容易在别处被复制成真注入；评审 rev2 建议显式化）。
-        if with_parts:
-            base = "SELECT role, content, parts_json FROM messages WHERE session_id = ?"
+        if with_parts or with_media:
+            base = ("SELECT role, content, parts_json, attachments, quoted, reply_to "
+                    "FROM messages WHERE session_id = ?")
         else:
             base = "SELECT role, content FROM messages WHERE session_id = ?"
         if limit is None:
@@ -322,22 +364,29 @@ class SessionStore:
                     parts = None  # 库里存坏了就当没有，回落到纯文本，别让整条历史炸掉
                 if isinstance(parts, list) and parts:
                     entry["parts"] = parts
+            if with_media:
+                # 三个键各自独立判定：一条消息可以只有图、只有引用，或都有。
+                # 解析坏数据一律当"没有"（同 parts 的降级），不能让一行的
+                # 脏数据把整段历史炸掉。
+                entry.update(_media_keys(r))
             result.append(entry)
         return result
 
     def history_with_attachments(self, session_id: str) -> list[dict]:
-        """给 WebUI 历史帧用：[{role, content, images, parts}]。
+        """给 WebUI 历史帧用：[{role, content, images, parts, quoted, reply_to}]。
 
         - images：图片文件名列表（UX-06），网页回放要显示图。
         - parts：assistant 的分条数组（#11），网页要把一次多段回复拆成多气泡。
+        - quoted/reply_to：被引用原文与消息 ID（网页暂时不展示，纯增量带上）。
 
-        跟 history() 分开的原因：history() 是喂模型/给记忆的**文本契约**
-        （被多处测试钉着，不含附件/parts）；网页回放需要这两样。两者别合并——
-        模型不该因为界面上有图就改变喂进去的历史形状。
+        跟 history() 分开的原因：两者**默认形状**不同——history() 是喂模型/
+        给记忆的文本契约（不含附件/parts），网页回放要的是"带图带分条"。
+        （history() 现在也能用 with_media=True 取媒体，但那是给模型装配用的、
+        键名与降级规则都不同；别把两条路并成一条。）
         """
         rows = self._db.execute(
-            "SELECT role, content, attachments, parts_json FROM messages "
-            "WHERE session_id = ? ORDER BY seq",
+            "SELECT role, content, attachments, parts_json, quoted, reply_to "
+            "FROM messages WHERE session_id = ? ORDER BY seq",
             (session_id,),
         ).fetchall()
         out = []
@@ -355,7 +404,10 @@ class SessionStore:
                 except (json.JSONDecodeError, TypeError):
                     parts = None
             out.append({"role": r["role"], "content": r["content"],
-                        "images": imgs, "parts": parts})
+                        "images": imgs, "parts": parts,
+                        # quoted/reply_to 是纯增量：前端现在忽略未知键，
+                        # 先带上，回放要不要展示引用由前端将来自己定。
+                        "quoted": r["quoted"], "reply_to": r["reply_to"]})
         return out
 
     def messages(self, session_id: str, limit: int | None = None) -> list[dict]:

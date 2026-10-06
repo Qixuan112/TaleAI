@@ -90,8 +90,9 @@ async def handle_message(
 
     # 空白消息：不发请求、不落库（跟 CLI 的空行一致，省一次无意义调用）。
     # 例外：带图的消息即使没文字也算"有内容"——纯图片是合法输入（UX-06），
-    # 模型看图不需要配文。
-    if not message.content.strip() and not message.images:
+    # 模型看图不需要配文；只引用不说话的也算（quote-only）——修好引用图可见
+    # 之后，被引用的那句话本身就是他要说的事，丢掉就两头落空。
+    if not message.content.strip() and not message.images and not message.quoted:
         return None
 
     # 唤醒门（§UX-03）：群里没叫它 → 存进历史但不回。
@@ -113,10 +114,12 @@ async def handle_message(
             )
             # 图也要落库——未唤醒的群消息同样可能带图（纯图消息更是只有图），
             # 漏了 attachments 会让这些图在历史里凭空消失。
-            # reply_to 一视同仁地落（引用了哪条是消息的事实，与唤没唤醒无关）。
+            # reply_to / quoted 一视同仁地落（引用了哪条、引用的原话是什么，
+            # 都是消息的事实，与唤没唤醒无关）。
             store.append(session_id, "user", message.content,
                          reply_to=message.reply_to,
-                         attachments=list(message.images or []) or None)
+                         attachments=list(message.images or []) or None,
+                         quoted=message.quoted or None)
         except Exception:
             logger.exception("未唤醒消息落库失败，跳过")
         logger.debug("群聊未唤醒，已存库但不回：session=%s", session_id)
@@ -143,11 +146,14 @@ async def handle_message(
     # 躺在 history 末尾和"最新提问"里，重复发一遍。
     # with_parts=True：带出 assistant 的分条数组，供 run_loop 精确还原 <msg>
     # 标签（PR #10：纯文本形态无法往返）。
-    history = store.history(session_id, with_parts=True)
+    # with_media=True：带出图/引用，装配时渲染成 [图片] 与引用行——不开的话
+    # 窗口里的图片消息在模型眼里就是一条空消息、引用过的也看不出在回谁。
+    history = store.history(session_id, with_parts=True, with_media=True)
     try:
         store.append(session_id, "user", message.content,
                      reply_to=message.reply_to,
-                     attachments=list(message.images or []) or None)
+                     attachments=list(message.images or []) or None,
+                     quoted=message.quoted or None)
     except Exception:
         # 用户消息存不下来，这轮干脆不调模型——免得用户以为已经发出去了。
         # 但**要回一帧**：否则前端收不到任何东西，永远停在"塔利在想…"
@@ -165,15 +171,17 @@ async def handle_message(
     # 第 5~6 步：装配 + FC 循环（装配在 run_loop 内部完成，§18.5 硬规则 6）。
     # 会话类型/owner 一路带给装配——模型据此知道自己在群聊还是私聊（§十二）
     # images（UX-06）：这条消息带的图，只作用于最新提问，不回流历史。
-    # quoted（PR2）：被引用的那句话，也只进本次请求——同 reminder 的
-    # persist=False 精神（它是"这次的对话背景"，不是历史原文；引用了哪条
-    # 已由上面的 reply_to 落库）。
+    # quoted / quoted_images（PR2 + 本次修复）：被引用的那句话与被引用的图。
+    # 文字同时落库（store.append 的 quoted 列），所以下一轮读历史时模型仍看得见
+    # "他在回哪句话"；被引用的**图**不落库（与"历史里的图不回流喂模型"同规则），
+    # 只在发生的那一轮当视觉输入发一次。
     try:
         reply = await bot.run_loop(
             message.content, history, session_id,
             session_type=message.session_type, owner=message.owner,
             images=list(message.images or []),
             quoted=message.quoted,
+            quoted_images=list(message.quoted_images or []),
         )
     except Exception as exc:
         reply = _close_turn_on_error(store, session_id, exc)

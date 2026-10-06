@@ -11,6 +11,7 @@ import asyncio
 import json
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -400,7 +401,7 @@ def test_group_at_other_person_marks_not_addressed():
 def test_image_downloaded_into_images(monkeypatch):
     """带图消息：URL 被下载 → 文件名进 Message.images。"""
     monkeypatch.setattr(qq_adapter_mod, "download_image",
-                        lambda url: "fake_" + url.rsplit("/", 1)[-1])
+                        lambda url, **kw: "fake_" + url.rsplit("/", 1)[-1])
     a = QQAdapter()
     with TestClient(a.app).websocket_connect(
         "/qq", headers={"X-Self-ID": "10001"}
@@ -416,7 +417,7 @@ def test_image_downloaded_into_images(monkeypatch):
 
 def test_pure_image_message_is_delivered(monkeypatch):
     """纯图片（无文字）不再被丢弃——图就是内容。"""
-    monkeypatch.setattr(qq_adapter_mod, "download_image", lambda url: "img.png")
+    monkeypatch.setattr(qq_adapter_mod, "download_image", lambda url, **kw: "img.png")
     a = QQAdapter()
     with TestClient(a.app).websocket_connect(
         "/qq", headers={"X-Self-ID": "10001"}
@@ -431,7 +432,7 @@ def test_pure_image_message_is_delivered(monkeypatch):
 
 def test_image_download_failure_degrades_to_text(monkeypatch):
     """下载失败（返回 None）→ 当无图，不能卡住链路。"""
-    monkeypatch.setattr(qq_adapter_mod, "download_image", lambda url: None)
+    monkeypatch.setattr(qq_adapter_mod, "download_image", lambda url, **kw: None)
     a = QQAdapter()
     with TestClient(a.app).websocket_connect(
         "/qq", headers={"X-Self-ID": "10001"}
@@ -446,7 +447,7 @@ def test_image_download_failure_degrades_to_text(monkeypatch):
 
 
 def test_image_download_capped(monkeypatch):
-    monkeypatch.setattr(qq_adapter_mod, "download_image", lambda url: "i.png")
+    monkeypatch.setattr(qq_adapter_mod, "download_image", lambda url, **kw: "i.png")
     monkeypatch.setattr(qq_adapter_mod, "MAX_IMAGES_PER_MESSAGE", 2)
     a = QQAdapter()
     with TestClient(a.app).websocket_connect(
@@ -536,8 +537,14 @@ def test_quoted_fetch_failure_degrades_to_no_quote(monkeypatch):
     assert m.content == "这句怎么样"
 
 
-def test_inline_quoted_text_skips_get_msg():
-    """reply 段自带原文：直接用，不发 get_msg 动作。"""
+def test_inline_quoted_text_still_asks_get_msg(monkeypatch):
+    """reply 段里内联了原文，也照样发 get_msg——拉不到才回退用内联的。
+
+    原先是"有内联就短路、省一次往返"。代价是**被引用消息里的图永远不可见**
+    （get_msg 是唯一能拿到它的途径），用户实测的"引用图片看不见"就有这一份。
+    现在内联降级为兜底：拉到了用拉到的（更全），拉不到才用它。
+    """
+    monkeypatch.setattr(qq_adapter_mod, "_API_TIMEOUT", 0.05)  # 别真等 2 秒
     a = QQAdapter()
     link = FakeLink()
     a._link = link
@@ -547,8 +554,9 @@ def test_inline_quoted_text_skips_get_msg():
         reply_to="777", quoted="内联的原文",
     )
     asyncio.run(a._finish_message(msg))
-    assert link.sent == []       # 没发任何动作
-    assert a._inbox.qsize() == 1  # 照常投递
+    assert [p["action"] for p in link.sent] == ["get_msg"]  # 照样问了
+    assert msg.quoted == "内联的原文"    # 没人应答 → 回退内联文本，不丢内容
+    assert a._inbox.qsize() == 1          # 照常投递
 
 
 async def test_fetch_quoted_truncates_to_limit():
@@ -560,8 +568,140 @@ async def test_fetch_quoted_truncates_to_limit():
         return {"message": [{"type": "text", "data": {"text": "长" * 500}}]}
 
     a._call_api = fake_call
-    text = await a._fetch_quoted("42")
+    text, urls = await a._fetch_quoted("42")
     assert len(text) == QUOTED_MAX_CHARS
+    assert urls == []
+
+
+async def test_fetch_quoted_pure_image_gives_placeholder():
+    """被引用的是纯图消息 → 文字为空也要给 [图片] 占位，并把图 URL 带出来。
+
+    这是用户报的 bug 的直接回归：修复前 quoted 是空串，装配侧 `if quoted:`
+    不成立，模型连"他引用了一条消息"都不知道。
+    """
+    a = QQAdapter()
+
+    async def fake_call(action, params, *, timeout=None):
+        return {"message": [{"type": "image", "data": {"url": "https://x/q.png"}}]}
+
+    a._call_api = fake_call
+    text, urls = await a._fetch_quoted("42")
+    assert text == "[图片]"
+    assert urls == ["https://x/q.png"]
+
+
+async def test_fetch_quoted_text_and_image_marks_placeholder():
+    """引用的消息是"图 + 文字"：文字保留，另外标出 [图片]。
+
+    为什么要标：图只在发生的那一轮当视觉输入发一次，下一轮读历史时就只剩
+    这行文字了——不标的话模型事后不知道那条消息里还有图。
+    """
+    a = QQAdapter()
+
+    async def fake_call(action, params, *, timeout=None):
+        return {"message": [
+            {"type": "image", "data": {"url": "https://x/q.png"}},
+            {"type": "text", "data": {"text": "看这个"}},
+        ]}
+
+    a._call_api = fake_call
+    text, urls = await a._fetch_quoted("42")
+    assert text == "看这个 [图片]"
+    assert urls == ["https://x/q.png"]
+
+
+async def test_fetch_quoted_image_without_url_still_placeholder():
+    """有图段却拿不到可下载的 URL（实现只给本地文件名）→ 占位照样给：
+    "这里有过一张图"这个事实，不该因为下载不了就消失。"""
+    a = QQAdapter()
+
+    async def fake_call(action, params, *, timeout=None):
+        return {"message": [{"type": "image", "data": {"file": "abc.jpg"}}]}
+
+    a._call_api = fake_call
+    text, urls = await a._fetch_quoted("42")
+    assert text == "[图片]"
+    assert urls == []
+
+
+def test_quoted_image_is_fetched_and_downloaded(monkeypatch):
+    """端到端：引用一条图片消息 → get_msg 拿到图 → 下载 → 装进 quoted_images。
+
+    主回归（用户实测的那条）：修复前这条路上 quoted 是空串、
+    quoted_images 这个字段根本不存在，模型什么都看不到。
+    """
+    monkeypatch.setattr(qq_adapter_mod, "download_image",
+                        lambda url, **kw: "fake_" + url.rsplit("/", 1)[-1])
+    a = QQAdapter()
+    with TestClient(a.app).websocket_connect("/qq") as ws:
+        ws.send_json(reply_event(reply_id="42", text="这啥"))
+        action = ws.receive_json()
+        assert action["action"] == "get_msg"
+        ws.send_json({
+            "status": "ok", "retcode": 0,
+            "data": {"message_id": 42, "message": [
+                {"type": "image", "data": {"url": "https://x/q.png"}},
+            ]},
+            "echo": action["echo"],
+        })
+        m = _drain(a)
+    assert m.quoted == "[图片]"
+    assert m.quoted_images == ["fake_q.png"]
+    assert m.content == "这啥"
+
+
+def test_quoted_image_download_failure_keeps_placeholder(monkeypatch):
+    """被引用的图下载失败 → 至少留着 [图片] 占位，模型仍知道有这张图。"""
+    monkeypatch.setattr(qq_adapter_mod, "download_image", lambda url, **kw: None)
+    a = QQAdapter()
+    with TestClient(a.app).websocket_connect("/qq") as ws:
+        ws.send_json(reply_event(reply_id="42", text="这啥"))
+        action = ws.receive_json()
+        ws.send_json({
+            "status": "ok", "retcode": 0,
+            "data": {"message_id": 42, "message": [
+                {"type": "image", "data": {"url": "https://x/q.png"}},
+            ]},
+            "echo": action["echo"],
+        })
+        m = _drain(a)
+    assert m.quoted == "[图片]"
+    assert m.quoted_images == []
+
+
+def test_quote_only_message_is_delivered():
+    """只引用、不说话的消息不再被丢弃——被引用的那句话就是他要说的事。"""
+    a = QQAdapter()
+    msg = Message(
+        id="m10", platform="qq", session_id="qq:p1", owner="u1",
+        direction="in", role="user", content="", quoted="被引用的原话",
+    )
+    asyncio.run(a._finish_message(msg))
+    assert a._inbox.qsize() == 1
+
+
+# ---------- 图片下载预算（本次修复：不再"每张图各等 10 秒"）----------
+
+
+def test_download_images_stops_at_deadline(monkeypatch):
+    """预算已耗尽 → 一张都不下（绝对 deadline 兜底，不留"再来一张"的缝）。"""
+    monkeypatch.setattr(qq_adapter_mod, "download_image", lambda url, **kw: "i.png")
+    a = QQAdapter()
+    assert a._download_images(["https://x/1.png"], time.monotonic() - 1) == []
+
+
+def test_download_images_shrinks_timeout_to_remaining_budget(monkeypatch):
+    """每张图的超时 = min(单图上限, 剩余预算)：预算只剩 3 秒就只等 3 秒。"""
+    seen: list[float] = []
+
+    def fake(url, *, timeout=10.0):
+        seen.append(timeout)
+        return "i.png"
+
+    monkeypatch.setattr(qq_adapter_mod, "download_image", fake)
+    a = QQAdapter()
+    a._download_images(["https://x/1.png"], time.monotonic() + 3.0)
+    assert seen and 0 < seen[0] <= 3.0
 
 
 async def test_fetch_quoted_passes_numeric_message_id():

@@ -143,10 +143,30 @@ def extract_reply(message) -> tuple[str | None, str]:
     return None, ""
 
 
+def has_image(message) -> bool:
+    """这条消息里有没有图片段（**不管能不能拿到可下载的 URL**）。
+
+    为什么单独要它：`extract_image_urls` 只认 http(s) 开头的 URL，而有些
+    实现只给本地文件名（下载不了）——那种图我们喂不进模型，但"这里有一张图"
+    这个事实仍该让模型知道，好在文字为空时渲染成 [图片] 占位。
+    """
+    if isinstance(message, list):
+        return any(
+            isinstance(seg, dict) and seg.get("type") == "image"
+            for seg in message
+        )
+    if isinstance(message, str):
+        return "[CQ:image," in message
+    return False
+
+
 def extract_message_text(message) -> str:
     """把 message 字段取成纯文本（get_msg 响应复用同一套解析）。
 
-    引用场景只要文字——图/表情段剥掉没有损失（把图 URL 喂给模型也没用）。
+    只取文字段：图/表情段不在这里取——图片另有两条路（`extract_image_urls`
+    下载后当视觉输入喂；`has_image` 负责"有没有图"这个事实）。
+    **别把它当成"引用的全部内容"**：纯图引用取出来就是空串，只看它会把
+    整条引用丢掉——修过的 bug 正是这个。
     array 拼 text 段、string 剥 CQ 码，与消息事件的解析保持一致
     （复用 `_extract_text_and_mentions`，只丢 mentions）。
     """

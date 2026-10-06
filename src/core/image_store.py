@@ -36,6 +36,11 @@ MAX_UPLOAD_BYTES = 5 * 1024 * 1024
 #: 单条消息最多带几张图。
 MAX_IMAGES_PER_MESSAGE = 4
 
+#: "这里有一张图"的占位文本。两处共用，保证措辞永不分叉：
+#: ① 历史里带图的消息（chat_llm 装配时补）；② 被引用的消息只有图没有文字时
+#: （QQ 适配器补出的 quoted）。模型看不到图本身时，至少得知道"有过一张图"。
+IMAGE_PLACEHOLDER = "[图片]"
+
 #: image_store.py 在 src/core/ → parents[2] = 项目根
 _ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DIR = _ROOT / "data" / "temp" / "img"
@@ -173,20 +178,61 @@ def to_data_uri(name: str, *, base: Path | None = None) -> str | None:
     return f"data:{mime};base64," + base64.b64encode(data).decode("ascii")
 
 
+def _system_proxies() -> dict:
+    """系统代理配置（Windows 注册表 / 环境变量，urllib 自己那套）。
+
+    抽成函数只为一件事：测试能把它换成"有代理/没代理"两种世界，
+    而不必去动真实机器的设置。
+    """
+    return urllib.request.getproxies()
+
+
+def _urlopen(req: urllib.request.Request, timeout: float, *, direct: bool):
+    """开一个连接取数据。direct=True 时**绕开系统代理**（空 ProxyHandler）。
+
+    为什么要有"直连"这一档：Windows 注册表里配着系统代理时（本机
+    ProxyEnable=1 → 127.0.0.1:7890），urllib 默认就走它。代理进程活着、
+    上游节点却挂了时，表现正是"TLS 握手把超时吃满"——图全部静默丢失
+    （实测日志：`_ssl.c:989 handshake timed out`）。本机代理/直连会交替
+    失灵，所以两条都得能走。抽成函数是为了测试能把它整体换掉。
+    """
+    if direct:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    else:
+        opener = urllib.request.build_opener()
+    return opener.open(req, timeout=timeout)
+
+
 def download(url: str, *, base: Path | None = None, timeout: float = 10.0) -> str | None:
     """下载一张图（QQ 图片 URL 会过期，必须落地）。失败返回 None，绝不抛。
 
     网络是外部依赖：超时、404、过大、非图片——一律当"没这张图"，不阻断链路。
+
+    代理兜底（本次修复）：先按系统配置走（可能是代理），失败后**直连再试
+    一次**。两次尝试**平分**调用方给的 timeout——本机的故障形态就是"代理把
+    超时吃满"，若第一次就把额度用光，直连永远轮不到。没配代理的机器只有
+    一次尝试，行为与从前一字不差。
     """
     if not isinstance(url, str) or not url.startswith(("http://", "https://")):
         return None
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": "TaleAI/1.0"})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            # 只读 MAX_DOWNLOAD_BYTES+1，超出即判过大
-            data = resp.read(MAX_DOWNLOAD_BYTES + 1)
-    except Exception:
-        logger.warning("下载图片失败：%s", url, exc_info=True)
+    req = urllib.request.Request(url, headers={"User-Agent": "TaleAI/1.0"})
+    attempts = (False, True) if _system_proxies() else (False,)
+    per_try = timeout / len(attempts)
+    data: bytes | None = None
+    last_error: BaseException | None = None
+    for direct in attempts:
+        try:
+            with _urlopen(req, per_try, direct=direct) as resp:
+                # 只读 MAX_DOWNLOAD_BYTES+1，超出即判过大
+                data = resp.read(MAX_DOWNLOAD_BYTES + 1)
+            break
+        except Exception as exc:
+            # 第一次失败先记 debug：代理抖动期间不该把日志页刷屏
+            # （用户正是从日志页盯这些的），两条路都挂了才值得一条 warning。
+            last_error = exc
+            logger.debug("下载图片失败（%s）：%s", "直连" if direct else "系统代理", url)
+    if data is None:
+        logger.warning("下载图片失败（代理与直连都试过）：%s", url, exc_info=last_error)
         return None
     if len(data) > MAX_DOWNLOAD_BYTES:
         logger.warning("图片过大，丢弃：%s", url)

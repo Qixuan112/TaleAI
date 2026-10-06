@@ -144,7 +144,8 @@ class FakeBot:
         self.calls = []
 
     async def run_loop(self, user_question, history=None, session_id="",
-                       *, session_type="", owner="", images=None, quoted=""):
+                       *, session_type="", owner="", images=None, quoted="",
+                       quoted_images=None):
         self.calls.append((user_question, session_id))
         return Reply(session_id=session_id, messages=["好呀~"])
 
