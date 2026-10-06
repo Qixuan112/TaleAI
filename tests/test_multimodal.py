@@ -22,6 +22,7 @@ from core.adapter.base import AdapterBase, Message, Reply
 from core.adapter.registry import AdapterRegistry
 from core.adapter.router import Router
 from core.event_bus import EventBus
+from core.llm import chat_llm as chat_llm_mod
 from core.session.store import SessionStore
 
 # 最小合法 PNG（1x1 透明）——真实字节头，供 sniff 认出来
@@ -102,6 +103,85 @@ def test_cleanup_warns_when_protected_file_alone_over_limit(
     assert removed == 0
     assert (tmp_path / name).exists()  # 被保护的不许删
     assert any("仍超限" in r.getMessage() for r in caplog.records)
+
+
+# ================= download：代理失败 → 直连兜底（本次修复） =================
+
+
+class _FakeResp:
+    """假 HTTP 响应：with + read 两件套就够 download 用了。"""
+
+    def __init__(self, data: bytes):
+        self._data = data
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self, n=-1):
+        return self._data if n is None or n < 0 else self._data[:n]
+
+
+def test_download_falls_back_to_direct_when_proxy_fails(monkeypatch, tmp_path):
+    """系统代理挂了（TLS 握手超时）→ 直连再试一次，图仍然拿得到。
+
+    这是 10-06 那条日志的回归：代理进程活着、上游节点挂了，urllib 默认走
+    代理 → 握手把超时吃满 → 图静默丢失，模型什么都看不到。
+    """
+    tried: list[bool] = []
+
+    def fake_urlopen(req, timeout, *, direct):
+        tried.append(direct)
+        if not direct:
+            raise OSError("proxy handshake timeout")
+        return _FakeResp(PNG_1PX)
+
+    monkeypatch.setattr(image_store, "_urlopen", fake_urlopen)
+    monkeypatch.setattr(image_store, "_system_proxies",
+                        lambda: {"https": "http://127.0.0.1:7890"})
+    name = image_store.download("https://x/a.png", base=tmp_path)
+    assert tried == [False, True]           # 先代理、后直连
+    assert name and (tmp_path / name).exists()
+
+
+def test_download_splits_timeout_between_attempts(monkeypatch, tmp_path):
+    """两次尝试**平分**超时——不平分的话，代理吃满额度，直连永远轮不到。"""
+    seen: list[tuple[bool, float]] = []
+
+    def fake_urlopen(req, timeout, *, direct):
+        seen.append((direct, timeout))
+        raise OSError("nope")
+
+    monkeypatch.setattr(image_store, "_urlopen", fake_urlopen)
+    monkeypatch.setattr(image_store, "_system_proxies", lambda: {"https": "http://p"})
+    assert image_store.download("https://x/a.png", base=tmp_path) is None
+    assert seen == [(False, 5.0), (True, 5.0)]  # 默认 10 秒 → 各 5 秒
+
+
+def test_download_without_proxy_config_tries_once(monkeypatch, tmp_path):
+    """没配代理的机器只试一次——行为与修复前一字不差。"""
+    tried: list[bool] = []
+
+    def fake_urlopen(req, timeout, *, direct):
+        tried.append(direct)
+        return _FakeResp(PNG_1PX)
+
+    monkeypatch.setattr(image_store, "_urlopen", fake_urlopen)
+    monkeypatch.setattr(image_store, "_system_proxies", lambda: {})
+    image_store.download("https://x/a.png", base=tmp_path)
+    assert tried == [False]
+
+
+def test_download_returns_none_when_both_paths_fail(monkeypatch, tmp_path):
+    """代理与直连都挂 → 当无图（不抛、不卡链路）。"""
+    def fake_urlopen(req, timeout, *, direct):
+        raise OSError("all dead")
+
+    monkeypatch.setattr(image_store, "_urlopen", fake_urlopen)
+    monkeypatch.setattr(image_store, "_system_proxies", lambda: {"https": "http://p"})
+    assert image_store.download("https://x/a.png", base=tmp_path) is None
 
 
 # ================= store：attachments =================
@@ -202,6 +282,50 @@ def test_missing_image_degrades_to_text(bot):
     assert isinstance(msgs[-1]["content"], str)  # 没有可用图 → 纯字符串
 
 
+def test_quoted_image_joins_content_array(bot):
+    """被引用的图与当前消息的图一起进多模态数组。
+
+    引用一张图却看不见它，等于没引用——用户报的"引用图片看不见"就是这条。
+    """
+    name = image_store.save_bytes(PNG_1PX)
+    msgs = bot.assemble_messages("这啥", quoted="[图片]", quoted_images=[name])
+    content = msgs[-1]["content"]
+    assert isinstance(content, list)
+    assert "（引用了一条消息：[图片]）" in content[0]["text"]
+    assert content[1]["type"] == "image_url"
+    assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+def test_combined_image_cap_prefers_current_message(bot, monkeypatch):
+    """当前消息的图优先占张数上限：合并后封顶 4 张（防单请求体积失控）。
+
+    每张图最多 8MB，8 张就是几十 MB 的 base64 —— 网关多半直接拒。
+    """
+    monkeypatch.setattr(chat_llm_mod, "MAX_IMAGES_PER_MESSAGE", 4)
+    # 内容寻址：字节不同才是不同的图（否则会去重成同一个文件名）
+    current = [image_store.save_bytes(PNG_1PX + bytes([i])) for i in range(5)]
+    quoted = image_store.save_bytes(PNG_1PX + b"Q")
+    msgs = bot.assemble_messages("嗯", images=current, quoted_images=[quoted])
+    parts = msgs[-1]["content"]
+    uris = [p["image_url"]["url"] for p in parts if p["type"] == "image_url"]
+    assert len(uris) == 4
+    assert image_store.to_data_uri(quoted, base=image_store.DEFAULT_DIR) not in uris
+
+
+def test_missing_quoted_image_degrades_to_text(bot):
+    """被引用的图读不到（已回收）→ 跳过它；引用行与正文照旧。"""
+    msgs = bot.assemble_messages("这啥", quoted="[图片]", quoted_images=["gone.png"])
+    assert isinstance(msgs[-1]["content"], str)
+    assert "（引用了一条消息：[图片]）" in msgs[-1]["content"]
+
+
+def test_no_quoted_images_keeps_assembly_unchanged(bot):
+    """不传 quoted_images → 装配逐字节不变（老调用方零感知）。"""
+    a = bot.assemble_messages("你好", quoted="原话")
+    b = bot.assemble_messages("你好", quoted="原话", quoted_images=[])
+    assert a == b
+
+
 # ================= handle_message：纯图 + 附件落库 =================
 
 
@@ -227,7 +351,8 @@ class FakeBot:
         self.calls = []
 
     async def run_loop(self, user_question, history=None, session_id="",
-                       *, session_type="", owner="", images=None, quoted=""):
+                       *, session_type="", owner="", images=None, quoted="",
+                       quoted_images=None):
         self.calls.append((user_question, session_id, list(images or [])))
         return Reply(session_id=session_id, messages=["看到了"])
 
@@ -303,3 +428,24 @@ async def test_unwoken_group_image_message_persists_attachments(wiring, monkeypa
     rows = store.messages("g1")
     assert rows and rows[0]["role"] == "user"
     assert json.loads(rows[0]["attachments"]) == ["pic.png"]   # 图没丢
+
+
+async def test_unwoken_group_message_persists_quoted(wiring):
+    """群聊未唤醒的**引用**消息：引用原文也要落库。
+
+    群里那些没 @ 它的引用消息，将来被叫到时就是历史——原文不落库的话，
+    模型事后完全看不出"他当时在回哪句话"。落不落库与唤没唤醒无关。
+    """
+    main, adapter, router, bot, store, bus = wiring
+    from core.wake import WakePolicy
+    policy = WakePolicy(words=("塔利",), scope="group")
+
+    msg = Message(id="m", platform="fake", session_id="g2", owner="u1",
+                  direction="in", role="user", content="就这个",
+                  session_type="group", reply_to="77", quoted="被引用的原话")
+    reply = await main.handle_message(
+        msg, router=router, store=store, bot=bot, bus=bus, wake=policy)
+    assert reply is None                        # 未唤醒：不回
+    row = store.messages("g2")[0]
+    assert row["reply_to"] == "77"
+    assert row["quoted"] == "被引用的原话"

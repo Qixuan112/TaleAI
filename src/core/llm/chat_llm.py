@@ -25,7 +25,7 @@ from core.adapter.base import Reply
 from core.event_bus import EventBus
 from core.config.loader import Config
 from core.executor import ToolCall, ToolExecutor
-from core.image_store import to_data_uri
+from core.image_store import IMAGE_PLACEHOLDER, MAX_IMAGES_PER_MESSAGE, to_data_uri
 from core.llm.context import ContextAssembler, SessionContext, escape_tag_markers
 from core.llm.persona_llm.base import Persona
 from core.plugin.registry import PluginRegistry
@@ -94,6 +94,17 @@ def _canonical_signature(raw: str) -> str:
     return json.dumps(args, sort_keys=True, ensure_ascii=False)
 
 
+def _quoted_line(quoted: str) -> str:
+    """「他在回哪句话」那一行的**唯一**渲染口径（实时与历史两条路共用）。
+
+    措辞只写一次：两条路各写一份的话，将来改了一处必然漏另一处，
+    模型看到的历史与实时格式就会悄悄分叉。
+    转义不在这里做——调用方各自负责（实时路径在 assemble_messages 里转，
+    历史路径由 _history_turn_for_model 注入后统一过 escape_tag_markers）。
+    """
+    return f"（引用了一条消息：{quoted}）"
+
+
 def _history_turn_for_model(entry: dict) -> dict:
     """把一条历史 entry 转成**喂给模型**的形状（补回 <msg> 标签）。
 
@@ -117,6 +128,19 @@ def _history_turn_for_model(entry: dict) -> dict:
 
     返回值必须是**纯净的 {role, content}**：只喂模型认得的字段，不能把
     `parts` 一并带进请求体（严格网关会因未知字段 400）。
+
+    媒体与引用（entry 里由 `store.history(with_media=True)` 带出的键）：
+    历史里的图**不喂图本身**（UX-07 硬规则：历史是数据不是指令，
+    图只随最新一条消息发），但**必须让模型知道"这里有过一张图"**——
+    否则纯图消息在上下文里就是一条空白 user 消息，实测模型会直接答
+    "我没收到你的图"。带图 → 补 `[图片]` 占位（几张补几个）；带引用 →
+    补「（引用了一条消息：原文）」。只落了 ID 没原文（迁移前的旧行、
+    当轮 get_msg 没拉到）→ 退化成不带原文的短行，别装作没这回事。
+
+    ❗注入必须发生在本函数内 = 一定早于 assemble_messages 的
+    `escape_tag_markers`。`quoted` 是外部文本且会逐轮重喂，转义晚一步
+    就复现 PR #10 那个伪造系统块的洞。assistant 分支一行不动——
+    `[图片]`/引用行只可能挂在 user 行上（生产路径上只有 user 行有这些列）。
     """
     role = entry.get("role")
     content = entry.get("content", "")
@@ -140,7 +164,19 @@ def _history_turn_for_model(entry: dict) -> dict:
 
     # user（或其它角色）：不该有 <msg>，但也必须只留 role/content——
     # 历史 entry 可能带了 parts/其它 sidecar 键，一并丢干净。
-    return {"role": role, "content": content}
+    prefix = ""
+    quoted = entry.get("quoted")
+    if isinstance(quoted, str) and quoted:
+        prefix = _quoted_line(quoted) + "\n"
+    elif entry.get("reply_to"):
+        prefix = "（引用了一条消息）\n"
+    attachments = entry.get("attachments")
+    placeholder = (
+        " ".join([IMAGE_PLACEHOLDER] * len(attachments))
+        if isinstance(attachments, list) and attachments else ""
+    )
+    body = " ".join(p for p in (content, placeholder) if p)
+    return {"role": role, "content": prefix + body}
 
 
 class ChatLLM:
@@ -273,6 +309,7 @@ class ChatLLM:
         session: "SessionContext | None" = None,
         images: list[str] | None = None,
         quoted: str = "",
+        quoted_images: list[str] | None = None,
     ) -> list[dict[str, str]]:
         """装配：稳定前缀（人格 system）+ 会动尾巴（历史 + 最新提问）。
 
@@ -293,8 +330,13 @@ class ChatLLM:
 
         quoted（PR2）：被引用消息的文本（QQ 引用回复由适配器补出来）。
         插在动态块与正文之间**独立一行**，让模型知道"他在回哪句话"。
-        同 reminder 一样：只进本次请求、不落库（它是"这次对话的背景"，
-        不是历史原文）；转义要求也同用户提问——见下。
+        转义要求同用户提问——见下。（它同时也落库，下一轮由历史渲染补回，
+        见 _history_turn_for_model；所以这里不是它唯一的出场机会。）
+
+        quoted_images（本次修复）：被引用消息里的图片文件名，与 images 一起
+        进多模态数组——引用一张图却看不见它，等于没引用。
+        **当前消息的图优先**占张数上限：合并后按 MAX_IMAGES_PER_MESSAGE 截断，
+        防单请求体积失控（每张最多 8MB，8 张就是 85MB 量级，网关多半直接拒）。
 
         session（v4.14 补充）：它带来的 session_type 还决定 system 里注入哪份
         场景规则（私聊/群聊；见 Persona.build_system_prompt）。不给 session
@@ -335,16 +377,18 @@ class ChatLLM:
         if quoted:
             # 引用内容也是**外部文本**（别人在 QQ 里说的话）——同样要转义，
             # 否则被引用的原话里写 <system_reminder>… 就能伪造系统块（同一个洞）。
-            parts.append(f"（引用了一条消息：{escape_tag_markers(quoted)}）")
+            parts.append(_quoted_line(escape_tag_markers(quoted)))
         parts.append(safe_question)
         # 没 reminder 没 quoted 时 join 结果 == safe_question，文本路径不变
         text = "\n".join(parts)
 
         # 有图：最新提问发成 content 数组（图 + 文本）。图读不出（已被回收/
         # 文件缺失）就跳过它——不能让"图没了"把整条消息变得发不出去。
+        # 被引用的图跟着一起发；当前消息的图排在前面（截断时优先保住它们）。
+        names = [*(images or []), *(quoted_images or [])][:MAX_IMAGES_PER_MESSAGE]
         image_parts = [
             {"type": "image_url", "image_url": {"url": uri}}
-            for uri in (to_data_uri(name) for name in (images or []))
+            for uri in (to_data_uri(name) for name in names)
             if uri
         ]
         if image_parts:
@@ -434,6 +478,7 @@ class ChatLLM:
         self, user_question: str, history: list[dict[str, str]] | None = None,
         session_id: str = "", *, session_type: str = "", owner: str = "",
         images: list[str] | None = None, quoted: str = "",
+        quoted_images: list[str] | None = None,
     ) -> Reply:
         """FC 循环（§18.1 第 6 步）：最多 max_agent_steps 轮。
 
@@ -443,8 +488,9 @@ class ChatLLM:
         SessionContext 交给装配——模型据此知道自己在群聊还是私聊（§十二）。
         不传也能跑，只是模型看不到会话类型（命令行/单测如此）。
 
-        quoted（PR2）：被引用消息的文本（QQ 引用回复）。属于"这次请求的
-        动态背景"，随装配插到最新提问前——只进本次请求，不落库。
+        quoted（PR2）：被引用消息的文本（QQ 引用回复），插到最新提问前。
+        quoted_images（本次修复）：被引用消息里的图，与 images 合并进多模态。
+        两者只在**发生的那一轮**发图；文本另外落库，历史里由装配补回。
 
         ⚠️ 与 §19-2 的偏离（实测逼出来的）：文档写「每轮必须先产出 <msg>
         才允许携带 FC」，但真实模型第一轮就是**纯工具调用、content 为 None**
@@ -461,7 +507,8 @@ class ChatLLM:
         # 失败只会记 warning 并沿用上次成功的配置——热重载失败不该让对话失败。
         await self._refresh_config()
         messages = self.assemble_messages(user_question, history, session=session,
-                                          images=images, quoted=quoted)
+                                          images=images, quoted=quoted,
+                                          quoted_images=quoted_images)
         tools = self.registry.tool_schemas()
         # 记下本次会话 ID，_tool_message 发 tool.called 时用（旁路事件标注来源）
         self._current_session_id = session_id

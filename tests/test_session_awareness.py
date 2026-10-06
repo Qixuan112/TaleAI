@@ -128,7 +128,9 @@ def test_group_message_records_kind_group(tmp_path):
             pass
 
     class FakeBot:
-        async def run_loop(self, q, history=None, session_id=""):
+        async def run_loop(self, q, history=None, session_id="",
+                           *, session_type="", owner="", images=None, quoted="",
+                           quoted_images=None):
             return Reply(session_id=session_id, messages=["好"])
 
     store = SessionStore(tmp_path / "s.db").open()
@@ -169,7 +171,9 @@ def test_private_message_records_kind_private(tmp_path):
             pass
 
     class FakeBot:
-        async def run_loop(self, q, history=None, session_id=""):
+        async def run_loop(self, q, history=None, session_id="",
+                           *, session_type="", owner="", images=None, quoted="",
+                           quoted_images=None):
             return Reply(session_id=session_id, messages=["好"])
 
     store = SessionStore(tmp_path / "s.db").open()
