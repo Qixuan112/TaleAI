@@ -295,9 +295,16 @@ class ChatLLM:
         插在动态块与正文之间**独立一行**，让模型知道"他在回哪句话"。
         同 reminder 一样：只进本次请求、不落库（它是"这次对话的背景"，
         不是历史原文）；转义要求也同用户提问——见下。
+
+        session（v4.14 补充）：它带来的 session_type 还决定 system 里注入哪份
+        场景规则（私聊/群聊；见 Persona.build_system_prompt）。不给 session
+        时只注入全局规则——命令行/单测的旧行为零变化。
         """
+        # system 的规则层按会话类型分叉一次（规则是静态文件，分叉点压在
+        # system 最尾）；会话类型本体仍在下面的 reminder 动态块里，不进 system。
+        session_type = session.session_type if session is not None else ""
         messages: list[dict[str, str]] = [
-            {"role": "system", "content": self.persona.build_system_prompt()},  # 稳定 → 前缀
+            {"role": "system", "content": self.persona.build_system_prompt(session_type)},  # 稳定 → 前缀
         ]
 
         # 如果提供了历史，先按窗口裁到最近若干条（再多带几条旧的）
