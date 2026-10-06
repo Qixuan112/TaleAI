@@ -93,7 +93,9 @@ def test_session_info_goes_to_dynamic_block_not_system():
     # 静态提示词里本就该出现「群聊」（base.md 有群聊场景的行为指引），那是
     # 行为描述，不是会话类型泄漏。真正要防的是这行按会话生成的信息进 system。
     assert "会话类型：群聊" not in msgs[0]["content"]
-    assert msgs[0]["content"] == bot.persona.build_system_prompt()
+    # v4.14 起 system 按会话类型选一份场景规则，所以这里也要带上类型比对；
+    # 不写参数的话，本机写过 group.md 时两边会不等（CI 无 data/ 时碰巧相等）。
+    assert msgs[0]["content"] == bot.persona.build_system_prompt("group")
 
 
 # ---------- ensure_session 的 kind 不再永远是 private（真 bug） ----------

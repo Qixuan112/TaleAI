@@ -24,7 +24,11 @@ from core.adapter.registry import AdapterRegistry
 from core.adapter.router import Router, UnknownPlatformError
 from core.event_bus import EventBus
 from core.llm.chat_llm import ChatLLM
-from core.llm.persona_llm.base import USER_PERSONA_PATH, ensure_user_persona
+from core.llm.persona_llm.base import (
+    USER_PERSONA_PATH,
+    ensure_user_persona,
+    ensure_user_rules,
+)
 from core.log import Logging
 from core.log_stream import LogStream, StreamLogHandler
 from core.plugin.registry import PluginRegistry
@@ -505,7 +509,15 @@ def main() -> None:
     # 第 1 步的一部分：人格文件不存在就从内置模板落一份到 data/config/，
     # 用户第一次跑就有得改（§13：人格是用户的域）。幂等，绝不覆盖已改过的。
     if ensure_user_persona():
-        logger.info("已从内置模板生成 %s（要改人设就改它，改完重启）", USER_PERSONA_PATH)
+        logger.info("已从内置模板生成 %s（要改人设就改它，改完下一句生效）", USER_PERSONA_PATH)
+    # 第 1 步的另一部分：聊天规则三文件（全局/私聊/群聊）不存在就各落一份
+    # 空白骨架（§14 v4.14）。与人格不同：没有内置默认轨，留空就不注入。
+    created_rules = ensure_user_rules()
+    if created_rules:
+        logger.info(
+            "已生成聊天规则骨架：%s（写了就注入，留空不注入）",
+            "、".join(str(p) for p in created_rules),
+        )
     argv = sys.argv[1:]
     if "--cli" in argv:
         _run_cli(once="--once" in argv)
