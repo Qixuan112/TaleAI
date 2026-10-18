@@ -27,6 +27,7 @@ def record_event(
     owner: str,
     data: Dict[str, Any],
     ts: float | None = None,
+    publish: bool = True,
 ) -> None:
     """先落盘、后广播（§18.2 硬规则）。
 
@@ -38,6 +39,9 @@ def record_event(
         owner: 所有者（用户标识）
         data: 事件数据（各类型 schema 见 M1-02 文档）
         ts: 时间戳（可注入，默认由 eventlog 的 clock_fn 生成）
+        publish: 是否顺便广播。**message.received 传 False**——它的发布点是
+            适配器 `_deliver`（§18.2 定 Adapter 为生产者），这里只补落盘；
+            否则同一个事件会被广播两次（订阅者收到双份）。
 
     设计约束：
       - 先落盘、后 publish：落盘失败不影响前台对话（记忆是增强，不是主链路）
@@ -62,6 +66,9 @@ def record_event(
             owner,
         )
         # 继续往下走：总线照常发，订阅者能收到通知（虽然事实源没写上）
+
+    if not publish:
+        return
 
     # 2. 后 publish（§18.2）
     # 总线丢了无所谓——事实源在 events.jsonl，MemoryWorker 按游标重扫

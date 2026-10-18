@@ -82,7 +82,7 @@ async def handle_message(
     store: SessionStore,
     bot,
     bus: EventBus,
-    eventlog: EventLog,
+    eventlog: EventLog | None = None,
     wake: "WakePolicy | None" = None,
 ) -> Reply | None:
     """处理一条入站消息：§18.1 第 3~9 步。
@@ -196,15 +196,25 @@ async def handle_message(
                      reply_to=message.reply_to,
                      attachments=list(message.images or []) or None,
                      quoted=message.quoted or None)
-        # M1-02：记录 message.received 事件（先落盘、后 publish）
-        record_event(
-            bus=bus,
-            eventlog=eventlog,
-            event_type="message.received",
-            session_id=session_id,
-            owner=message.owner,
-            data={"content": message.content, "role": "user"},
-        )
+        # M1-03：首条用户消息给会话起名（DSH 的 session/title fallback 思路）。
+        # 已有标题不动——标题只定一次，不会被每轮对话覆盖。
+        # 纯图/纯引用消息没有文字可做标题，跳过（标题留空，列表用兜底名）。
+        if message.content.strip():
+            store.set_title_if_empty(session_id, message.content)
+        # M1-02：记录 message.received 事件（先落盘）。
+        # 它的**发布点是适配器 `_deliver`**（§18.2 定 Adapter 为生产者），
+        # 这里只补落盘，不再广播——否则订阅者会收到双份。
+        # eventlog=None（测试/裸装配）时无需任何动作（适配器已广播）。
+        if eventlog is not None:
+            record_event(
+                bus=bus,
+                eventlog=eventlog,
+                event_type="message.received",
+                session_id=session_id,
+                owner=message.owner,
+                data={"content": message.content, "role": "user"},
+                publish=False,
+            )
     except Exception:
         # 用户消息存不下来，这轮干脆不调模型——免得用户以为已经发出去了。
         # 但**要回一帧**：否则前端收不到任何东西，永远停在"塔利在想…"
@@ -257,17 +267,27 @@ async def handle_message(
     await _safe_send(adapter, reply)
 
     # 第 9 步：记录 message.sent 事件（M1-02：先落盘、后 publish）
-    record_event(
-        bus=bus,
-        eventlog=eventlog,
-        event_type="message.sent",
-        session_id=session_id,
-        owner=message.owner,
-        data={
-            "messages": list(reply.messages),
-            "stop_reason": reply.stop_reason,
-        },
-    )
+    if eventlog is not None:
+        record_event(
+            bus=bus,
+            eventlog=eventlog,
+            event_type="message.sent",
+            session_id=session_id,
+            owner=message.owner,
+            data={
+                "messages": list(reply.messages),
+                "stop_reason": reply.stop_reason,
+            },
+        )
+    else:
+        # 没注入 eventlog（测试/裸装配）：广播不能少——订阅者/日志靠它
+        bus.publish(
+            "message.sent",
+            session_id=session_id,
+            owner=message.owner,
+            messages=list(reply.messages),
+            stop_reason=reply.stop_reason,
+        )
     return reply
 
 
@@ -314,7 +334,7 @@ async def serve_forever(
     store: SessionStore,
     bot,
     bus: EventBus,
-    eventlog: EventLog,
+    eventlog: EventLog | None = None,
     wake: "WakePolicy | None" = None,
 ) -> None:
     """常驻前台循环：每个适配器一个 recv 协程（§18.5「每平台 1 个 recv 协程」）。
@@ -445,7 +465,11 @@ def _build(bus: EventBus | None = None):
         # 所以用 history_with_attachments（它一并给了这两样）。文本契约
         # history() 不变——那是喂模型的，两者别混。
         history_provider=store.history_with_attachments,
-        clearer=store.clear, stream=stream,
+        clearer=store.clear,
+        # M1-03：会话列表投影（只给 web 平台，一次聚合查询带出派生字段）。
+        # 用回调注入，适配器不认识 SessionStore（§22）。
+        sessions_provider=store.sessions_for_web,
+        stream=stream,
         extra_routes=_control_plane,
     )
     registry.register(web_adapter)

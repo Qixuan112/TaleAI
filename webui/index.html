@@ -26,12 +26,126 @@
   }
   .app {
     width: 100%;
-    max-width: 760px;
+    max-width: 1100px;
     height: 100%;
     display: flex;
     flex-direction: column;
     background: var(--panel);
     box-shadow: 0 0 40px rgba(0,0,0,.05);
+    position: relative;          /* 窄屏抽屉定位锚 */
+  }
+
+  /* ---- M1-03 多会话：左侧栏 + 主区 ---- */
+  .shell {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+  }
+  .sidebar {
+    width: 280px;
+    flex: none;
+    display: flex;
+    flex-direction: column;
+    border-right: 1px solid var(--line);
+    background: var(--panel);
+    overflow: hidden;
+  }
+  .sidebar-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 6px;
+  }
+  .sidebar-title { font-size: 12px; color: var(--muted); }
+  .icon-btn {
+    border: 0; background: transparent; color: var(--muted);
+    width: 28px; height: 28px; padding: 0;
+    border-radius: 8px; cursor: pointer;
+    display: grid; place-items: center;
+  }
+  .icon-btn:hover { background: var(--tale-soft); color: var(--ink); }
+  .sidebar-scroll {
+    flex: 1; min-height: 0;
+    overflow-y: auto;
+    padding: 0 4px 8px;
+    display: flex; flex-direction: column; gap: 2px;
+  }
+  .nav-group-title {
+    font-size: 12px; font-weight: 500; color: var(--muted);
+    padding: 4px 8px;
+  }
+  .session-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
+  /* 行：36px 高，图标槽 28，gap 8（LobeChat 数值） */
+  .nav-item {
+    display: flex; align-items: center; gap: 8px;
+    width: 100%;
+    height: 36px;
+    padding: 0 4px;
+    border: 0; background: transparent;
+    border-radius: 8px;
+    font: inherit; font-size: 14px;
+    color: var(--muted);
+    text-align: left; cursor: pointer;
+    user-select: none;
+    transition: background .2s ease-out, color .2s ease-out;
+  }
+  .nav-item .nav-icon {
+    width: 28px; height: 28px; flex: none;
+    display: grid; place-items: center;
+    font-size: 15px; color: var(--muted);
+  }
+  .nav-item .nav-title {
+    flex: 1; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .nav-item:hover { background: var(--tale-soft); color: var(--ink); }
+  .nav-item:hover .nav-icon { color: var(--ink); }
+  .nav-item.active {
+    background: var(--tale-soft);
+    color: var(--ink);
+    font-weight: 500;
+    box-shadow: inset 3px 0 0 var(--tale);
+  }
+  .nav-item.active .nav-icon { color: var(--tale); }
+  .nav-item .nav-date { flex: none; font-size: 11px; opacity: .55; }
+
+  .main-col {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  /* 聊天内容列限宽居中：侧栏之外仍保持可读行宽 */
+  .main-col > #messages,
+  .main-col > .thumbs,
+  .main-col > form {
+    width: 100%;
+    max-width: 760px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+
+  /* 侧栏折叠：整体滑出（LobeChat 的做法） */
+  .sidebar.collapsed { width: 0; transform: translateX(-100%); border-right: 0; }
+
+  /* 窄屏（<768px）：侧栏变抽屉，默认收起，点顶栏按钮打开 */
+  .sidebar-backdrop { display: none; }
+  @media (max-width: 768px) {
+    .sidebar {
+      position: absolute; top: 0; bottom: 0; left: 0;
+      z-index: 20;
+      transform: translateX(-100%);
+      transition: transform .2s ease-out;
+      box-shadow: 0 0 24px rgba(0,0,0,.12);
+    }
+    .sidebar.open { transform: translateX(0); }
+    .sidebar.collapsed { width: 280px; transform: translateX(-100%); }
+    .sidebar-backdrop.show {
+      display: block;
+      position: absolute; inset: 0;
+      z-index: 15;
+      background: rgba(0,0,0,.25);
+    }
   }
   header {
     padding: 14px 20px;
@@ -288,6 +402,13 @@
 <body>
 <div class="app">
   <header>
+    <button id="sidebarToggle" class="icon-btn" type="button"
+            aria-label="会话列表" title="会话列表">
+      <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+        <rect x="3" y="4" width="18" height="16" rx="2" fill="none" stroke="currentColor" stroke-width="2"/>
+        <line x1="9" y1="4" x2="9" y2="20" stroke="currentColor" stroke-width="2"/>
+      </svg>
+    </button>
     <h1>塔利</h1>
     <span id="status" class="status off">连接中…</span>
     <span class="spacer"></span>
@@ -303,15 +424,36 @@
     <a href="/logs">日志</a>
   </nav>
 
-  <div id="messages"></div>
+  <div class="shell">
+    <div id="sidebarBackdrop" class="sidebar-backdrop"></div>
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-head">
+        <span class="sidebar-title">会话</span>
+      </div>
+      <div class="sidebar-scroll">
+        <button class="nav-item" id="newSession" type="button">
+          <span class="nav-icon">＋</span>
+          <span class="nav-title">新建会话</span>
+        </button>
+        <div class="nav-group">
+          <div class="nav-group-title">最近</div>
+          <ul class="session-list" id="sessionList"></ul>
+        </div>
+      </div>
+    </aside>
 
-  <div id="thumbs" class="thumbs"></div>
-  <form id="composer">
-    <button id="attach" class="attach" type="button" title="添加图片（也可直接粘贴）">＋</button>
-    <input id="file" type="file" accept="image/*" multiple hidden>
-    <textarea id="input" placeholder="跟塔利说点什么…" autofocus></textarea>
-    <button id="send" type="submit">发送</button>
-  </form>
+    <div class="main-col">
+      <div id="messages"></div>
+
+      <div id="thumbs" class="thumbs"></div>
+      <form id="composer">
+        <button id="attach" class="attach" type="button" title="添加图片（也可直接粘贴）">＋</button>
+        <input id="file" type="file" accept="image/*" multiple hidden>
+        <textarea id="input" placeholder="跟塔利说点什么…" autofocus></textarea>
+        <button id="send" type="submit">发送</button>
+      </form>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -321,13 +463,111 @@ function sessionId() {
   var k = "taleai.session_id";
   var v = localStorage.getItem(k);
   if (!v) {
-    v = "web:" + (crypto.randomUUID ? crypto.randomUUID().slice(0, 8)
-                                     : Math.random().toString(36).slice(2, 10));
+    v = newSessionId();
     localStorage.setItem(k, v);
   }
   return v;
 }
+function newSessionId() {
+  return "web:" + (crypto.randomUUID ? crypto.randomUUID().slice(0, 8)
+                                     : Math.random().toString(36).slice(2, 10));
+}
 var SID = sessionId();
+
+// ---- 多会话侧栏（M1-03）------------------------------------------------------
+// 目的：能开多条会话、各自独立、刷新记得当前是哪条。
+// 数据来自 GET /api/sessions（后端投影：title/date/count/preview 一次给全）。
+var sidebarEl = document.getElementById("sidebar");
+var sidebarBackdropEl = document.getElementById("sidebarBackdrop");
+var sessionListEl = document.getElementById("sessionList");
+var newSessionEl = document.getElementById("newSession");
+var sessionsCache = [];
+var refreshTimer = null;
+
+// 窄屏：打开抽屉；宽屏：无操作（侧栏常驻）
+function openDrawer() {
+  sidebarEl.classList.add("open");
+  sidebarBackdropEl.classList.add("show");
+}
+function closeDrawer() {
+  sidebarEl.classList.remove("open");
+  sidebarBackdropEl.classList.remove("show");
+}
+
+document.getElementById("sidebarToggle").addEventListener("click", function () {
+  if (window.matchMedia("(max-width: 768px)").matches) {
+    if (sidebarEl.classList.contains("open")) closeDrawer(); else openDrawer();
+  } else {
+    sidebarEl.classList.toggle("collapsed");
+  }
+});
+sidebarBackdropEl.addEventListener("click", closeDrawer);
+
+// 渲染会话列表。全部用 createElement + textContent（XSS 纪律）。
+function renderSessions(sessions) {
+  sessionListEl.replaceChildren();
+  sessions.forEach(function (s) {
+    var li = document.createElement("li");
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "nav-item" + (s.id === SID ? " active" : "");
+    btn.title = s.preview || s.title;
+
+    var icon = document.createElement("span");
+    icon.className = "nav-icon";
+    icon.textContent = "💬";
+
+    var title = document.createElement("span");
+    title.className = "nav-title";
+    title.textContent = s.title;
+
+    var date = document.createElement("span");
+    date.className = "nav-date";
+    date.textContent = s.date;
+
+    btn.appendChild(icon);
+    btn.appendChild(title);
+    btn.appendChild(date);
+    btn.addEventListener("click", function () { switchSession(s.id); });
+    li.appendChild(btn);
+    sessionListEl.appendChild(li);
+  });
+}
+
+// 拉列表（500ms 节流：连发消息时不狂刷）
+function refreshSessions() {
+  clearTimeout(refreshTimer);
+  refreshTimer = setTimeout(function () {
+    fetch("/api/sessions")
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (!j.ok) return;
+        sessionsCache = j.sessions || [];
+        renderSessions(sessionsCache);
+      })
+      .catch(function () { /* 列表拉不到不打断聊天 */ });
+  }, 500);
+}
+
+// 切换会话：换 localStorage 里的 id → 重连 WS（服务端会补发该会话历史）
+function switchSession(id) {
+  if (!id || id === SID) { closeDrawer(); return; }
+  SID = id;
+  localStorage.setItem("taleai.session_id", id);
+  closeDrawer();
+  messagesEl.innerHTML = "";
+  if (ws) {
+    intentionalClose = true;
+    try { ws.close(); } catch (e) {}
+  }
+  connect();
+  refreshSessions();
+}
+
+// 新建会话：生成新 id → 同一套切换逻辑
+newSessionEl.addEventListener("click", function () {
+  switchSession(newSessionId());
+});
 
 // ---- DOM ---------------------------------------------------------------------
 var messagesEl = document.getElementById("messages");
@@ -394,6 +634,7 @@ function addSystemNote(text) {
 // ---- WebSocket ---------------------------------------------------------------
 var ws = null;
 var pending = null;   // 等待回复时占位的那条气泡
+var intentionalClose = false;   // 主动关闭（切换会话）时不必自动重连
 
 // ---- 分条渲染：模拟真人打字 --------------------------------------------------
 // 一条回复可能分好几条（先应一声、再答正文）。QQ 是在服务端逐条发、条间 sleep
@@ -453,6 +694,7 @@ async function renderReply(data) {
     meta.textContent = "（结束原因：" + data.stop_reason + "）";
     messagesEl.appendChild(meta);
   }
+  refreshSessions();   // 消息数/预览/标题变了，列表跟着更新
 }
 
 function connect() {
@@ -462,12 +704,14 @@ function connect() {
   ws.onopen = function () {
     setStatus("已连接", true);
     sendEl.disabled = false;
+    refreshSessions();   // M1-03：连上就刷新会话列表（新建/切换后语义一致）
   };
   ws.onclose = function () {
     setStatus("已断开，重连中…", false);
     sendEl.disabled = true;
     clearEl.disabled = false;   // 别让清空钮卡在禁用（发送时禁的）
     disarm();
+    if (intentionalClose) { intentionalClose = false; return; }  // 切换会话：connect() 已重新建连
     setTimeout(connect, 1500);   // 断线自动重连
   };
   ws.onerror = function () { setStatus("连接出错", false); };

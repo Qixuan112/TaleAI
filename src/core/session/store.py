@@ -133,6 +133,15 @@ def _media_keys(row: sqlite3.Row) -> dict:
     return out
 
 
+def _fallback_title(session_id: str) -> str:
+    """标题为空时给会话列表一个可读名字：`web:ab12cd34` → `会话 ab12cd34`。
+
+    为什么不在前端拼：列表是投影，后端一次给全，前端只负责渲染（XSS 面更小）。
+    """
+    tail = session_id.split(":", 1)[-1]
+    return f"会话 {tail}" if tail else "会话"
+
+
 class SessionStore:
     """会话/消息的持久化。schema 见 §18.3。"""
 
@@ -223,6 +232,63 @@ class SessionStore:
             "SELECT * FROM sessions ORDER BY last_active DESC"
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def sessions_for_web(self, platform: str = "web") -> list[dict]:
+        """WebUI 会话列表的投影（M1-03）。
+
+        与 sessions() 的区别：
+        - 只返回指定平台的会话（WebUI 不该枚举 QQ/CLI 会话）
+        - 一次聚合查询带出列表要展示的派生字段，**不逐会话扫 messages**
+          （DSH 的 projcache 思路：列表读投影，不重扫日志）
+
+        返回：[{id, title, kind, last_active, date, count, preview}]
+        """
+        rows = self._db.execute(
+            """
+            SELECT
+              s.id, s.title, s.kind, s.last_active,
+              (SELECT COUNT(*) FROM messages m
+                WHERE m.session_id = s.id AND m.seq > s.reset_seq) AS count,
+              (SELECT m.content FROM messages m
+                WHERE m.session_id = s.id AND m.seq > s.reset_seq
+                ORDER BY m.seq DESC LIMIT 1) AS last_content
+            FROM sessions s
+            WHERE s.platform = ?
+            ORDER BY s.last_active DESC
+            """,
+            (platform,),
+        ).fetchall()
+
+        out: list[dict] = []
+        for r in rows:
+            last_content = r["last_content"] or ""
+            out.append({
+                "id": r["id"],
+                "title": r["title"] or _fallback_title(r["id"]),
+                "kind": r["kind"],
+                "last_active": r["last_active"],
+                "date": time.strftime("%m-%d", time.localtime(r["last_active"])),
+                "count": int(r["count"] or 0),
+                "preview": last_content[:40],
+            })
+        return out
+
+    def set_title_if_empty(self, session_id: str, title: str, limit: int = 20) -> None:
+        """标题为空时写入（DSH 的 session/title fallback 思路）。
+
+        首条用户消息落库后调用；已有标题不动——标题只定一次，
+        避免每轮对话把用户起的名字覆盖掉（LLM 生成标题留到以后）。
+        """
+        clipped = title.strip().replace("\n", " ")[:limit]
+        if not clipped:
+            return
+        with self._lock:
+            self._db.execute(
+                "UPDATE sessions SET title = ? WHERE id = ? "
+                "AND (title IS NULL OR title = '')",
+                (clipped, session_id),
+            )
+            self._db.commit()
 
     def by_tag(self, tag: str) -> list[dict]:
         """按标签找会话（§22 的 `by_tag()`）。
