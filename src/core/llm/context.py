@@ -88,7 +88,9 @@ class ContextSpec:
 _SESSION_TYPE_LABELS = {"private": "私聊", "group": "群聊"}
 
 
-def _build_chat_env(session: SessionContext, now: datetime) -> ContextBlock:
+def _build_chat_env(
+    session: SessionContext, now: datetime, data: dict | None = None
+) -> ContextBlock:
     """环境块：当前时间 + 会话类型（M1 起再加记忆摘要、未读等）。
 
     时间用「现在」是有意的——模型的知识截止到训练时，不给它当前时间，
@@ -104,10 +106,65 @@ def _build_chat_env(session: SessionContext, now: datetime) -> ContextBlock:
     return ContextBlock(name="chat_env", kind="dynamic", order=10, content="\n".join(lines))
 
 
+def _build_conversation_segment(
+    session: SessionContext, now: datetime, data: dict | None = None
+) -> ContextBlock:
+    """MemoryLLM extract 的原料：游标之后的一批对话事件。
+
+    每条带 seq——提示词要求 refs 指回它，写盘时也按这个 seq 校验引用，
+    模型编不出不存在的来源。
+
+    `data["events"]` 是 EventLog.read_batch() 的原始字典。只渲染两种事件：
+    message.received（用户）与 message.sent（我）；其它类型（session.closed
+    等）对提炼没有直接语义，跳过。
+    """
+    events = (data or {}).get("events") or []
+    lines: list[str] = []
+    for event in events:
+        etype = event.get("type")
+        payload = event.get("data") or {}
+        if etype == "message.received":
+            who, text = "用户", str(payload.get("content") or "")
+        elif etype == "message.sent":
+            who, text = "我", "\n".join(payload.get("messages") or [])
+        else:
+            continue
+        if text.strip():
+            # 用户原文里可能带 <system_reminder> 之类的标记；虽然这里进的是
+            # MemoryLLM 的 user 消息、不是系统块，仍按外部来源统一转义。
+            lines.append(f"[seq={event.get('seq')}] {who}：{escape_tag_markers(text)}")
+    return ContextBlock(
+        name="conversation_segment", kind="dynamic", order=20, content="\n".join(lines)
+    )
+
+
+def _build_existing_curated(
+    session: SessionContext, now: datetime, data: dict | None = None
+) -> ContextBlock:
+    """已有记忆（§十二：extract 必须看见，防重复 / 防冲突 / 支持更新）。
+
+    `data["existing"]` 是 CuratedStore.read_all() 的条目列表。
+    id 要露出来：模型输出 supersedes 时靠它指认旧条目。
+    """
+    entries = (data or {}).get("existing") or []
+    lines = [
+        f"- id={e.get('id')}｜重要度={e.get('importance')}｜{escape_tag_markers(str(e.get('content') or ''))}"
+        for e in entries
+        if str(e.get("content") or "").strip()
+    ]
+    return ContextBlock(
+        name="existing_curated", kind="dynamic", order=21, content="\n".join(lines)
+    )
+
+
 # 源名 → 构造函数。M1/M2 的新源（memory_hits / ledger_digest / unread_inbox）
 # 在这里登记，同时在下面的 spec 里挂上配额。
-_BUILDERS: dict[str, Callable[[SessionContext, datetime], ContextBlock]] = {
+# 第三个参数 data 是"本次装配的原料"（如 extract 的事件批次）——不是所有源
+# 都用得上，所以带默认值；ContextAssembler 统一透传。
+_BUILDERS: dict[str, Callable[..., ContextBlock]] = {
     "chat_env": _build_chat_env,
+    "conversation_segment": _build_conversation_segment,
+    "existing_curated": _build_existing_curated,
 }
 
 # M0 只声明 ChatLLM 的感知清单（§22 备注）。M1 补：
@@ -115,6 +172,11 @@ _BUILDERS: dict[str, Callable[[SessionContext, datetime], ContextBlock]] = {
 # M2 补：("ledger_digest", ...)
 _SPECS: dict[str, ContextSpec] = {
     "chat": ContextSpec(llm_name="chat", sources=[("chat_env", 0, 0)]),
+    # M1-04：extract 的原料 = 对话片段 + 已有记忆（§十二 感知清单）
+    "memory": ContextSpec(
+        llm_name="memory",
+        sources=[("conversation_segment", 0, 0), ("existing_curated", 0, 0)],
+    ),
 }
 
 
@@ -127,9 +189,15 @@ class ContextAssembler:
         self._clock = clock or datetime.now
 
     def assemble(
-        self, llm_name: str, session: SessionContext | None = None
+        self,
+        llm_name: str,
+        session: SessionContext | None = None,
+        data: dict | None = None,
     ) -> list[ContextBlock]:
         """装配某个 LLM 的感知块，按 order 排序返回。
+
+        `data` 是本次装配的原料（如 MemoryLLM extract 的事件批次与已有记忆），
+        由调用方交给对应的源；chat 等不用的源直接忽略。
 
         未知 llm_name 直接报错——静默返回空列表会让"忘了声明 spec"
         变成一个查不出来的 bug。
@@ -146,7 +214,7 @@ class ContextAssembler:
             builder = _BUILDERS.get(source)
             if builder is None:
                 continue  # 该源还没有生产者，跳过（M1/M2 会补上）
-            blocks.append(builder(session, now))
+            blocks.append(builder(session, now, data))
 
         blocks.sort(key=lambda b: b.order)
         return blocks

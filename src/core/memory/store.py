@@ -191,6 +191,7 @@ class CuratedStore:
         content: str,
         importance: int,
         refs: List[Dict[str, Any]],
+        tags: Optional[List[str]] = None,
         created_at: Optional[float] = None,
     ) -> str:
         """追加一条提炼记忆，返回分配的 id。
@@ -201,6 +202,7 @@ class CuratedStore:
             content: 记忆内容
             importance: 重要度 1-5
             refs: 原文引用 [{event_seq, quote}, ...]
+            tags: 封闭词表标签（提炼端归一，供检索粗筛/关系网用）
             created_at: 创建时间（可注入，默认当前）
 
         Returns:
@@ -221,6 +223,7 @@ class CuratedStore:
                 "content": content,
                 "importance": importance,
                 "refs": refs,
+                "tags": list(tags or []),  # 字段只增不改（§18.3）：M1-04 新增
                 "created_at": created_at,
                 "last_access": created_at,  # 初始等于创建时间
                 "status": "active",  # active / forgotten
