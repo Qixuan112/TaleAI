@@ -174,9 +174,15 @@ class MemoryLLM:
         if not events:
             return []
 
-        owner = str(events[0].get("owner") or "")
-        session_id = str(events[0].get("session_id") or "")
-        session = session or SessionContext(session_id=session_id, owner=owner)
+        # 归属以会话为准：群聊里每条事件的 owner 是**发言者**，若拿第一条事件的
+        # owner 当记忆主人，会把群里所有人的话记到第一个说话的人头上。
+        # session.owner（会话主人）优先，没给才退回事件上的 owner。
+        event_owner = str(events[0].get("owner") or "")
+        event_session_id = str(events[0].get("session_id") or "")
+        if session is None:
+            session = SessionContext(session_id=event_session_id, owner=event_owner)
+        owner = session.owner or event_owner
+        session_id = session.session_id or event_session_id
 
         if existing is None:
             existing = self.store.read_all(owner=owner or None, status="active")

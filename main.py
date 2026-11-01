@@ -32,7 +32,8 @@ from core.llm.persona_llm.base import (
 )
 from core.log import Logging
 from core.log_stream import LogStream, StreamLogHandler
-from core.memory import EventLog, record_event
+from core.memory import CuratedStore, EventLog, record_event
+from core.memory.worker import MemoryWorker
 from core.plugin.registry import PluginRegistry
 from core.session.store import SessionStore
 from core.wake import WakePolicy, load_wake_policy
@@ -413,6 +414,14 @@ def _build(bus: EventBus | None = None):
 
     # M1-02：初始化 EventLog（记忆事件落盘）
     eventlog = EventLog(Path(__file__).parent / "data" / "memory" / "events.jsonl")
+    # M1-05：curated 存储 + 后台提炼 worker。worker 只订阅门铃（message.sent /
+    # session.closed），任务本体按游标从 events.jsonl 取（§18.4）。
+    curated = CuratedStore(Path(__file__).parent / "data" / "memory" / "curated.jsonl")
+    from core.llm.memory_llm import MemoryLLM
+
+    memory_worker = MemoryWorker(
+        store=store, eventlog=eventlog, llm=MemoryLLM(curated), bus=bus,
+    )
 
     from core.adapter.web.adapter import WebAdapter
 
@@ -477,12 +486,12 @@ def _build(bus: EventBus | None = None):
 
     router = Router(registry)
 
-    return store, router, bot, bus, adapters, stream, eventlog, qq_service
+    return store, router, bot, bus, adapters, stream, eventlog, qq_service, memory_worker
 
 
 async def _serve() -> None:
     """默认跑法：起 WebSocket 服务（WebUI 聊天 + /logs 日志页）。"""
-    store, router, bot, bus, adapters, stream, eventlog, qq_service = _build()
+    store, router, bot, bus, adapters, stream, eventlog, qq_service, memory_worker = _build()
     # 日志镜像：把 root 的每条日志也推到 /logs 页。**单独挂**而不是塞进
     # Logging.init()——init 的契约是「只加一个文件 handler」（test_log.py 钉着），
     # 破了它日志会重复落盘。服务退出时摘掉，保持干净。
@@ -513,6 +522,7 @@ async def _serve() -> None:
             *(_safe_start(a) for a in adapters),
             serve_forever(adapters, router=router, store=store, bot=bot, bus=bus,
                           eventlog=eventlog, wake=wake),
+            memory_worker.run(),
         )
     finally:
         root.removeHandler(mirror)

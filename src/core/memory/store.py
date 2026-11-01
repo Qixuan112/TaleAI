@@ -140,6 +140,38 @@ class EventLog:
                 except json.JSONDecodeError:
                     continue
 
+    def read_session_batch(
+        self, session_id: str, after_seq: int = 0, limit: int = 200
+    ) -> Iterator[Dict[str, Any]]:
+        """按会话 + 游标读批次（M1-05 extract 用）。
+
+        与 read_batch 的区别：在扫描时就按 session_id 过滤。extract 的游标是
+        **每会话一份**，若先按全局游标取再过滤，别的会话事件会把批次额度吃光，
+        当前会话反而取不到东西。
+        """
+        if not self.filepath.exists():
+            return
+
+        count = 0
+        with open(self.filepath, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+
+                try:
+                    entry = json.loads(line)
+                    if (
+                        entry.get("seq", 0) > after_seq
+                        and entry.get("session_id") == session_id
+                    ):
+                        yield entry
+                        count += 1
+                        if count >= limit:
+                            break
+                except json.JSONDecodeError:
+                    continue
+
     def get_max_seq(self) -> int:
         """返回当前最大 seq（用于游标初始化）。"""
         with self._lock:

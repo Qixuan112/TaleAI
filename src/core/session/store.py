@@ -312,6 +312,31 @@ class SessionStore:
         ).fetchone()
         return int(row["reset_seq"]) if row is not None and row["reset_seq"] else 0
 
+    def get_cursor(self, session_id: str) -> int:
+        """extract 游标：这条会话已经提炼到哪个全局 event seq。
+
+        游标**落在磁盘上**（§18.4）：队列丢了、进程重启，都按它重扫，
+        已提炼过的事件不会被重复提炼。
+        """
+        row = self._db.execute(
+            "SELECT event_seq FROM session_cursors WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        return int(row["event_seq"]) if row is not None and row["event_seq"] else 0
+
+    def set_cursor(self, session_id: str, event_seq: int) -> None:
+        """推进 extract 游标（只在提炼成功后调用）。"""
+        with self._lock:
+            self._db.execute(
+                """
+                INSERT INTO session_cursors(session_id, event_seq)
+                VALUES(?, ?)
+                ON CONFLICT(session_id) DO UPDATE SET event_seq = excluded.event_seq
+                """,
+                (session_id, int(event_seq)),
+            )
+            self._db.commit()
+
     def mark_reset(self, session_id: str) -> int:
         """把重置点推到当前最新（&newtale 的"忘掉"）。
 
