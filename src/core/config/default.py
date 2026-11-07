@@ -36,4 +36,19 @@ DEFAULT_CONFIG = {
     },
     # 平台接入（M0 留空即可，YAGNI）
     "platforms": {},
+    # 记忆系统配置（M1 新增）
+    "memory": {
+        # 衰减参数
+        "half_life_days": 30,  # 半衰期：30 天后 importance 权重减半
+        "forget_threshold": 0.5,  # 遗忘阈值：score < 0.5 且超龄 → 打墓碑
+        "min_age_for_forget_days": 30,  # 最小遗忘年龄：新记忆不会被立刻忘掉
+        "importance_never_forget": 4,  # importance ≥ 4 永不自动遗忘
+        # 触发参数
+        "extract_idle_minutes": 10,  # 会话静默 N 分钟后触发 extract
+        "consolidate_interval_hours": 6,  # 定时 consolidate 间隔
+        "consolidate_event_threshold": 50,  # 新事件 ≥ N 条触发 consolidate
+        # 检索参数
+        "retrieve_top_k": 20,  # 检索最多返回 N 条记忆
+        "retrieve_token_budget": 2000,  # 记忆注入的 token 预算
+    },
 }
