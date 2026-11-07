@@ -100,6 +100,10 @@
   }
   .nav-item:hover { background: var(--tale-soft); color: var(--ink); }
   .nav-item:hover .nav-icon { color: var(--ink); }
+  .nav-item:focus-visible, .icon-btn:focus-visible {
+    outline: 2px solid var(--tale);
+    outline-offset: 2px;
+  }
   .nav-item.active {
     background: var(--tale-soft);
     color: var(--ink);

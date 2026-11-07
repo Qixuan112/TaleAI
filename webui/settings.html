@@ -15,11 +15,12 @@
     --line: #e6e3dc;
     --ok: #5fbf7f;
     --bad: #d9534f;
+    --shadow: 0 12px 36px rgba(43,43,43,.07);
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; }
   body {
-    background: var(--bg);
+    background: radial-gradient(1200px 600px at 50% -10%, #fbfaf7 0%, var(--bg) 55%);
     color: var(--ink);
     font: 15px/1.6 "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
     display: flex;
@@ -32,16 +33,18 @@
     display: flex;
     flex-direction: column;
     background: var(--panel);
-    box-shadow: 0 0 40px rgba(0,0,0,.05);
+    box-shadow: var(--shadow);
   }
   header {
-    padding: 14px 20px;
+    padding: 16px 20px 12px;
     border-bottom: 1px solid var(--line);
     display: flex;
     align-items: center;
     gap: 10px;
   }
+  header .titles { display: flex; flex-direction: column; gap: 2px; }
   header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  header .sub { font-size: 12px; color: var(--muted); }
   header .spacer { flex: 1; }
 
   /* ---- 顶部导航：聊天 / 设置 / 日志（当前页高亮）---- */
@@ -61,6 +64,7 @@
     margin-bottom: -1px;
   }
   .nav a:hover { color: var(--ink); }
+  .nav a:focus-visible { outline: 2px solid var(--tale); outline-offset: 2px; border-radius: 4px; }
   .nav a.active { color: var(--tale); border-bottom-color: var(--tale); font-weight: 600; }
 
   main { flex: 1; overflow-y: auto; padding: 20px; }
@@ -90,31 +94,82 @@
     color: inherit;
     outline: none;
     background: #fff;
+    transition: border-color .15s, box-shadow .15s;
   }
-  .field input:focus, .field select:focus { border-color: var(--tale); }
+  .field input[type=number] { font-variant-numeric: tabular-nums; }
+  .field input:hover, .field select:hover { border-color: #d8d4cb; }
+  .field input:focus, .field select:focus {
+    border-color: var(--tale);
+    box-shadow: 0 0 0 3px var(--tale-soft);
+  }
   .field input[type=checkbox] { width: auto; }
 
+  /* ---- 吸底操作栏：滚动时始终够得着保存；有未保存改动时亮红点 ---- */
   .actions {
     display: flex; align-items: center; gap: 12px;
-    padding-top: 4px; position: sticky; bottom: 0;
-    background: var(--panel);
+    position: sticky; bottom: 0; z-index: 5;
+    margin: 20px -20px -20px;
+    padding: 12px 20px calc(12px + env(safe-area-inset-bottom, 0px));
+    background: rgba(255,255,255,.94);
+    backdrop-filter: blur(8px);
+    border-top: 1px solid var(--line);
+    box-shadow: 0 -10px 24px rgba(43,43,43,.05);
   }
   .actions button {
     border: 0; background: var(--tale); color: #fff;
     padding: 10px 22px; border-radius: 10px; font: inherit; cursor: pointer;
+    min-width: 96px;
+    box-shadow: 0 4px 12px rgba(107,127,215,.25);
+    transition: background .15s, transform .12s, box-shadow .15s, opacity .15s;
   }
-  .actions button:disabled { opacity: .5; cursor: default; }
-  .result { font-size: 13px; }
+  .actions button:hover:not(:disabled) { background: #5f73cf; transform: translateY(-1px); }
+  .actions button:active:not(:disabled) { transform: translateY(0); }
+  .actions button:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 3px var(--tale-soft), 0 4px 12px rgba(107,127,215,.25);
+  }
+  .actions button:disabled { opacity: .45; cursor: default; box-shadow: none; }
+  .actions .dirty-hint {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 12px; color: var(--muted);
+  }
+  .actions .hint-text { display: none; }
+  .actions.dirty .hint-text { display: inline; }
+  .actions .dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--bad); display: none;
+  }
+  .actions.dirty .dot { display: inline-block; }
+  .result {
+    flex: 1; min-width: 0; font-size: 13px;
+    opacity: 0; transition: opacity .2s;
+  }
+  .result.show { opacity: 1; }
   .result.ok { color: var(--ok); }
   .result.bad { color: var(--bad); }
 
+  /* ---- 加载骨架：首屏别只留一行"加载中…" ---- */
+  .skeleton {
+    height: 58px; border-radius: 12px; margin: 0 0 14px;
+    background: linear-gradient(90deg, #f1efe9 25%, #f8f7f3 37%, #f1efe9 63%);
+    background-size: 400% 100%;
+    animation: shimmer 1.4s ease infinite;
+  }
+  @keyframes shimmer { 0% { background-position: 100% 0; } 100% { background-position: 0 0; } }
+
   /* ---- 抽屉分组：标题条常驻，内容向下滑出 / 收起 ---- */
-  .drawer { border: 1px solid var(--line); border-radius: 12px; margin: 0 0 14px; overflow: hidden; }
+  .drawer {
+    border: 1px solid var(--line); border-radius: 12px; margin: 0 0 14px;
+    overflow: hidden; transition: border-color .15s, box-shadow .15s;
+  }
+  .drawer:hover { border-color: #dcd8cf; }
   .drawer-head {
     width: 100%; display: flex; align-items: center; justify-content: space-between;
     gap: 10px; padding: 12px 16px; border: 0; background: var(--panel);
     font: inherit; font-size: 13px; font-weight: 600; color: var(--tale); cursor: pointer;
+    transition: background .15s;
   }
+  .drawer-head:hover, .drawer-head:focus-visible { background: #fbfaf7; outline: none; }
   .drawer-head .caret { color: var(--muted); transition: transform .2s; }
   .drawer.collapsed .caret { transform: rotate(-90deg); }
   .drawer-body { display: grid; grid-template-rows: 1fr; transition: grid-template-rows .25s ease; }
@@ -164,7 +219,10 @@
 <body>
 <div class="app">
   <header>
-    <h1>塔利 · 设置</h1>
+    <div class="titles">
+      <h1>塔利 · 设置</h1>
+      <span class="sub">改完保存，下一句对话生效</span>
+    </div>
     <span class="spacer"></span>
   </header>
 
@@ -197,6 +255,11 @@
 
 var bodyEl = document.getElementById("body");
 
+// 首屏骨架：三个抽屉形状的占位，比一行"加载中…"更像"马上就好"
+(function showSkeleton() {
+  for (var i = 0; i < 3; i++) bodyEl.appendChild(el("div", "skeleton"));
+})();
+
 // 要展示的域（本批范围：config 全部 + secrets 的密钥）。
 // 顺序即页面上的分组顺序。
 var DOMAINS = [
@@ -206,6 +269,10 @@ var DOMAINS = [
 
 // 每个字段的输入控件记在这里：key → (读值/写值)
 var controls = {};
+
+// 保存基线：key → 初始值字符串。用来判断"有没有未保存的改动"。
+var baseline = {};
+var actionsEl = null, saveBtn = null, resultEl = null, saving = false;
 
 function el(tag, cls, text) {
   var e = document.createElement(tag);
@@ -274,7 +341,48 @@ function makeControl(spec, value) {
       else input.value = (value == null ? "" : value);
     }
   };
+
+  // 整数配置用 step=1，避免出现 10.5 这种"看起来能填"的值
+  if (spec.type === "number" && typeof spec.default === "number") {
+    input.step = Number.isInteger(spec.default) ? "1" : "any";
+  }
+  input.addEventListener("input", onEdit);
+  input.addEventListener("change", onEdit);
   return wrap;
+}
+
+// ---------- 未保存改动：按钮状态 / 离开提醒 / Ctrl+S ----------
+
+function onEdit() {
+  if (resultEl) { resultEl.className = "result"; resultEl.textContent = ""; }
+  updateDirtyUI();
+}
+
+function isDirty() {
+  return Object.keys(controls).some(function (k) {
+    var c = controls[k];
+    // 密钥框留空 = "不修改"，不算改动
+    if (c.spec.type === "password") return c.input.value !== "";
+    return String(c.read()) !== baseline[k];
+  });
+}
+
+function snapshotBaseline() {
+  baseline = {};
+  Object.keys(controls).forEach(function (k) {
+    var c = controls[k];
+    baseline[k] = c.spec.type === "password" ? "" : String(c.read());
+  });
+}
+
+function updateDirtyUI() {
+  var dirty = isDirty();
+  if (actionsEl) actionsEl.classList.toggle("dirty", dirty);
+  if (saveBtn) {
+    saveBtn.disabled = saving || !dirty;
+    saveBtn.textContent = saving ? "保存中…" : (dirty ? "保存改动" : "保存");
+    saveBtn.setAttribute("aria-busy", saving ? "true" : "false");
+  }
 }
 
 function makeDrawer(title) {
@@ -290,7 +398,11 @@ function makeDrawer(title) {
   body.appendChild(inner);
   sec.appendChild(head);
   sec.appendChild(body);
-  head.addEventListener("click", function () { sec.classList.toggle("collapsed"); });
+  head.addEventListener("click", function () {
+    var collapsed = sec.classList.toggle("collapsed");
+    head.setAttribute("aria-expanded", String(!collapsed));
+  });
+  head.setAttribute("aria-expanded", "true");
   return { section: sec, pad: pad };
 }
 
@@ -396,20 +508,30 @@ function buildForm(groups) {
 
   bodyEl.appendChild(buildQQDrawer());
 
-  var actions = el("div", "actions");
-  var btn = el("button", null, "保存");
-  var result = el("span", "result");
-  actions.appendChild(btn);
-  actions.appendChild(result);
-  bodyEl.appendChild(actions);
+  actionsEl = el("div", "actions");
+  saveBtn = el("button", null, "保存");
+  saveBtn.type = "button";
+  var dirtyHint = el("span", "dirty-hint");
+  dirtyHint.appendChild(el("span", "dot"));
+  dirtyHint.appendChild(el("span", "hint-text", "有未保存的改动"));
+  resultEl = el("span", "result");
+  resultEl.setAttribute("aria-live", "polite");
+  actionsEl.appendChild(saveBtn);
+  actionsEl.appendChild(dirtyHint);
+  actionsEl.appendChild(resultEl);
+  bodyEl.appendChild(actionsEl);
 
-  btn.addEventListener("click", function () { save(btn, result); });
+  saveBtn.addEventListener("click", save);
+  snapshotBaseline();
+  updateDirtyUI();
 }
 
-function save(btn, result) {
-  btn.disabled = true;
-  result.className = "result";
-  result.textContent = "保存中…";
+function save() {
+  if (saving) return;
+  saving = true;
+  updateDirtyUI();
+  resultEl.className = "result show";
+  resultEl.textContent = "保存中…";
 
   // 按域分组提交（两个域两次 POST）
   var byDomain = {};
@@ -428,40 +550,62 @@ function save(btn, result) {
   });
 
   Promise.all(posts).then(function (results) {
-    btn.disabled = false;
     var bad = results.filter(function (r) { return !r.j.ok; });
     if (bad.length) {
-      result.className = "result bad";
-      result.textContent = "保存失败：" + (bad[0].j.error || "未知错误");
+      saving = false;
+      updateDirtyUI();
+      resultEl.className = "result show bad";
+      resultEl.textContent = "保存失败：" + (bad[0].j.error || "未知错误");
       return;
     }
-    result.className = "result ok";
-    result.textContent = "已保存。" + ((results[0].j && results[0].j.note) || "");
+    resultEl.className = "result show ok";
+    resultEl.textContent = "已保存。" + ((results[0].j && results[0].j.note) || "");
     // 原地刷新值（密钥打码状态、list 归一后的样子），**不重建 DOM**——
     // 重建会把上面这条 result 元素一起换掉，回执就没了；原地刷新还能保住焦点。
-    refreshValues();
+    // 刷新完再重设基线：此时"已保存"与磁盘一致，按钮回到禁用态。
+    refreshValues().then(function () {
+      snapshotBaseline();
+      saving = false;
+      updateDirtyUI();
+    });
   }).catch(function (e) {
-    btn.disabled = false;
-    result.className = "result bad";
-    result.textContent = "网络错误：" + e;
+    saving = false;
+    updateDirtyUI();
+    resultEl.className = "result show bad";
+    resultEl.textContent = "网络错误：" + e;
   });
 }
 
 // 重新拉一遍各域的值，写回已有控件（不动页面结构）。
 function refreshValues() {
-  DOMAINS.forEach(function (d) {
-    getJSON("/api/settings/values?domain=" + encodeURIComponent(d.domain)).then(function (res) {
+  return Promise.all(DOMAINS.map(function (d) {
+    return getJSON("/api/settings/values?domain=" + encodeURIComponent(d.domain)).then(function (res) {
       if (!res.ok || !res.values) return;
       Object.keys(res.values).forEach(function (key) {
         var c = controls[d.domain + "|" + key];
         if (c) c.apply(res.values[key]);
       });
     }).catch(function () {});
-  });
+  }));
 }
 
 document.getElementById("bannerRetry").addEventListener("click", function () {
   postQQ(true).catch(function () {});
+});
+
+// 有未保存改动时，关页面/刷新先拦一下（浏览器只显示自己的通用文案）
+window.addEventListener("beforeunload", function (e) {
+  if (!isDirty()) return;
+  e.preventDefault();
+  e.returnValue = "";
+});
+
+// Ctrl/Cmd + S 保存（与按钮同一套防重复提交逻辑）
+document.addEventListener("keydown", function (e) {
+  if ((e.ctrlKey || e.metaKey) && (e.key === "s" || e.key === "S")) {
+    e.preventDefault();
+    if (saveBtn && !saveBtn.disabled) save();
+  }
 });
 
 renderAll().then(buildForm).then(loadQQ).catch(function (e) {
