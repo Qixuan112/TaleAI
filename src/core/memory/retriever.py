@@ -14,8 +14,9 @@ score（§19-8，M1-06 正式接入遗忘时复用）：
 age 现在用 `created_at`（提炼时间）。等 M1-06 给 curated 补 `event_ts`
 后改成按事件时间衰减——计划类记忆的"年龄"才准。
 
-last_access 回写不在检索里做：检索在**热路径**（每轮对话），写盘会拖慢
-前台、还会让 curated.jsonl 每轮多一行。M1-06 用后台批量回写。
+last_access 回写：检索命中后回写，但**限流**——同一条记忆一小时内只写一次。
+检索在热路径（每轮对话），不节流会让 curated.jsonl 每轮多一行；一小时足够
+让衰减公式感知"最近提过"。
 """
 
 import logging
@@ -31,6 +32,9 @@ logger.addHandler(logging.NullHandler())
 DEFAULT_TOP_K = 20
 DEFAULT_TOKEN_BUDGET = 2000
 DEFAULT_HALF_LIFE_DAYS = 30.0
+
+#: last_access 回写的最小间隔（秒）。热路径限流用。
+LAST_ACCESS_REFRESH_SECONDS = 3600.0
 
 
 def score(entry: dict, now: float, half_life_days: float = DEFAULT_HALF_LIFE_DAYS) -> float:
@@ -125,4 +129,20 @@ class MemoryRetriever:
             selected.append(entry)
             used += cost
 
+        self._touch(selected, now)
         return selected
+
+    def _touch(self, entries: list[dict], now: float) -> None:
+        """回写命中条目的 last_access（限流，绝不抛）。"""
+        for entry in entries:
+            try:
+                last = float(entry.get("last_access") or entry.get("created_at") or 0)
+                if now - last < LAST_ACCESS_REFRESH_SECONDS:
+                    continue
+                entry_id = str(entry.get("id") or "")
+                if not entry_id:
+                    continue
+                self._store.update_last_access(entry_id)
+                entry["last_access"] = now
+            except Exception:
+                logger.debug("回写 last_access 失败（忽略）：id=%s", entry.get("id"))

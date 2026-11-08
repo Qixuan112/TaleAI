@@ -8,6 +8,7 @@
 """
 
 import asyncio
+import json
 import os
 import sys
 import time
@@ -44,14 +45,21 @@ def store(tmp_path):
     session_store.close()
 
 
-def make_worker(store, tmp_path, llm, *, idle_minutes=0, clock=None, tick_seconds=30.0):
+def make_worker(
+    store, tmp_path, llm, *, idle_minutes=0, clock=None, tick_seconds=30.0,
+    eventlog=None, memory_cfg=None, consolidator=None, state_path=None,
+):
+    cfg = {"extract_idle_minutes": idle_minutes}
+    cfg.update(memory_cfg or {})
     return MemoryWorker(
         store=store,
-        eventlog=EventLog(tmp_path / "events.jsonl"),
+        eventlog=eventlog or EventLog(tmp_path / "events.jsonl"),
         llm=llm,
-        config_reader=lambda: {"extract_idle_minutes": idle_minutes},
+        config_reader=lambda: cfg,
         clock=clock or time.time,
         tick_seconds=tick_seconds,
+        consolidator=consolidator,
+        state_path=state_path,
     )
 
 
@@ -209,3 +217,96 @@ class TestRunLoop:
                 await task
 
         assert len(llm.calls) == 1
+
+
+# ---------- M1-06：consolidate 触发 ----------
+
+
+class FakeConsolidator:
+    def __init__(self, fail=False):
+        self.calls = []
+        self.fail = fail
+
+    def run(self, now=None):
+        self.calls.append(now)
+        if self.fail:
+            raise RuntimeError("整合失败")
+        return {"checked": 3, "forgotten": ["old-id"]}
+
+
+NOW = 1_800_000_000.0
+
+
+class TestConsolidateTrigger:
+    async def test_runs_when_due_by_time(self, store, tmp_path):
+        consolidator = FakeConsolidator()
+        state_path = tmp_path / "consolidate_state.json"
+        worker = make_worker(
+            store, tmp_path, FakeMemoryLLM(), clock=lambda: NOW,
+            consolidator=consolidator, state_path=state_path,
+        )
+
+        await worker.tick()
+
+        assert len(consolidator.calls) == 1
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        assert state["last_run"] == NOW
+        assert state["event_seq"] == 0
+
+    async def test_skips_when_not_due(self, store, tmp_path):
+        consolidator = FakeConsolidator()
+        state_path = tmp_path / "consolidate_state.json"
+        state_path.write_text(
+            json.dumps({"last_run": NOW, "event_seq": 0}), encoding="utf-8"
+        )
+        worker = make_worker(
+            store, tmp_path, FakeMemoryLLM(), clock=lambda: NOW,
+            consolidator=consolidator, state_path=state_path,
+        )
+
+        await worker.tick()
+
+        assert consolidator.calls == []
+
+    async def test_runs_when_event_threshold_reached(self, store, tmp_path):
+        consolidator = FakeConsolidator()
+        state_path = tmp_path / "consolidate_state.json"
+        state_path.write_text(
+            json.dumps({"last_run": NOW, "event_seq": 0}), encoding="utf-8"
+        )
+        log = EventLog(tmp_path / "events.jsonl")
+        for i in range(50):
+            log.append("message.received", "s1", "u1", {"content": f"第{i}条"})
+        worker = make_worker(
+            store, tmp_path, FakeMemoryLLM(), clock=lambda: NOW,
+            eventlog=log, consolidator=consolidator, state_path=state_path,
+            memory_cfg={"consolidate_interval_hours": 6,
+                        "consolidate_event_threshold": 50},
+        )
+
+        await worker.tick()
+
+        assert len(consolidator.calls) == 1
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        assert state["event_seq"] == 50
+
+    async def test_failure_does_not_advance_state(self, store, tmp_path):
+        consolidator = FakeConsolidator(fail=True)
+        state_path = tmp_path / "consolidate_state.json"
+        worker = make_worker(
+            store, tmp_path, FakeMemoryLLM(), clock=lambda: NOW,
+            consolidator=consolidator, state_path=state_path,
+        )
+
+        await worker.tick()
+        assert not state_path.exists()
+
+        consolidator.fail = False
+        await worker.tick()
+        assert len(consolidator.calls) == 2
+        assert state_path.exists()
+
+    async def test_no_consolidator_is_a_noop(self, store, tmp_path):
+        """假 llm 没有 store、也没显式注入时，整合整体关闭（旧行为）。"""
+        worker = make_worker(store, tmp_path, FakeMemoryLLM(), clock=lambda: NOW)
+        await worker.tick()  # 不抛即可

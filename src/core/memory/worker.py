@@ -16,14 +16,18 @@
 """
 
 import asyncio
+import json
 import logging
+import os
 import time
+from pathlib import Path
 from typing import Callable
 
 from core.config.loader import Config
 from core.event_bus import Event, EventBus
 from core.llm.context import SessionContext
 from core.llm.memory_llm import MemoryLLM
+from core.memory.consolidator import MemoryConsolidator
 from core.memory.store import EventLog
 from core.session.store import SessionStore
 
@@ -57,6 +61,8 @@ class MemoryWorker:
         config_reader: Callable[[], dict] | None = None,
         clock: Callable[[], float] | None = None,
         tick_seconds: float = DEFAULT_TICK_SECONDS,
+        consolidator: MemoryConsolidator | None = None,
+        state_path: Path | None = None,
     ) -> None:
         self._store = store
         self._eventlog = eventlog
@@ -64,6 +70,19 @@ class MemoryWorker:
         self._config_reader = config_reader or _memory_config
         self._clock = clock or time.time
         self.tick_seconds = tick_seconds
+
+        # consolidate（M1-06）：默认从 MemoryLLM 的 store 构造——worker 本来就
+        # 管着它的生命周期，不必让 main 多传一份 curated。测试给假 llm 时没有
+        # store，就不开整合（保持旧行为）。
+        curated = getattr(llm, "store", None)
+        self._consolidator = consolidator
+        if self._consolidator is None and curated is not None:
+            self._consolidator = MemoryConsolidator(
+                curated, clock=self._clock, config_reader=self._config_reader
+            )
+        if state_path is None and curated is not None:
+            state_path = Path(curated.filepath).parent / "consolidate_state.json"
+        self._state_path = Path(state_path) if state_path is not None else None
 
         # 门铃：只装 session_id，不装任务本体（§18.4）
         self._queue: asyncio.Queue[str] = asyncio.Queue(maxsize=_DOORBELL_MAXSIZE)
@@ -143,6 +162,8 @@ class MemoryWorker:
 
             await self._extract(session_id, row, events)
 
+        self._maybe_consolidate(memory)
+
     async def _extract(self, session_id: str, row: dict, events: list[dict]) -> None:
         session = SessionContext(
             session_id=session_id,
@@ -168,3 +189,58 @@ class MemoryWorker:
             len(written),
             last_seq,
         )
+
+    # ---------- consolidate（M1-06） ----------
+
+    def _maybe_consolidate(self, memory: dict) -> None:
+        """到点/够量就跑一轮遗忘判定。
+
+        两条触发（§十一）：距上次 ≥ consolidate_interval_hours，或新事件数
+        ≥ consolidate_event_threshold。状态落在磁盘（last_run + event_seq），
+        重启不会每次都重跑；跑失败不推进状态，下一轮重试。
+        """
+        if self._consolidator is None:
+            return
+
+        now = self._clock()
+        state = self._load_state()
+        interval = float(memory.get("consolidate_interval_hours", 6)) * 3600
+        event_threshold = int(memory.get("consolidate_event_threshold", 50))
+        max_seq = self._eventlog.get_max_seq()
+
+        due_by_time = now - float(state.get("last_run") or 0) >= interval
+        due_by_events = max_seq - int(state.get("event_seq") or 0) >= event_threshold
+        if not (due_by_time or due_by_events):
+            return
+
+        try:
+            result = self._consolidator.run(now=now)
+        except Exception:
+            logger.exception("consolidate 失败（状态不推进，下一轮重试）")
+            return
+
+        self._save_state({"last_run": now, "event_seq": max_seq})
+        logger.info(
+            "consolidate 完成：检查 %d 条，遗忘 %d 条",
+            result.get("checked", 0),
+            len(result.get("forgotten", [])),
+        )
+
+    def _load_state(self) -> dict:
+        if self._state_path is None:
+            return {}
+        try:
+            return json.loads(self._state_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    def _save_state(self, state: dict) -> None:
+        if self._state_path is None:
+            return
+        try:
+            self._state_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._state_path.with_suffix(self._state_path.suffix + ".tmp")
+            tmp.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, self._state_path)
+        except OSError:
+            logger.exception("保存 consolidate 状态失败（下一轮重试）")

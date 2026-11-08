@@ -7,12 +7,17 @@
   - 排序按衰减分；token 预算截断；条数上限
 """
 
+import os
+import sys
 import time
 
 import pytest
 
-from src.core.memory.retriever import MemoryRetriever, score
-from src.core.memory.store import CuratedStore
+# 与 test_chat_loop.py 一致：把 src 放进 path，按运行时的方式导入（core.*）。
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "src"))
+
+from core.memory.retriever import MemoryRetriever, score
+from core.memory.store import CuratedStore
 
 NOW = 1_800_000_000.0
 DAY = 86400.0
@@ -144,3 +149,44 @@ class TestTruncation:
         add(store, "甲乙")
 
         assert len(retriever.retrieve("u1")) == 2
+
+
+class TestLastAccess:
+    def test_stale_hit_updates_last_access(self, tmp_path):
+        """命中回写：一小时没碰过的条目，下一次命中要更新 last_access。"""
+        touched_at = NOW + 120
+        store = CuratedStore(
+            tmp_path / "curated.jsonl", clock_fn=lambda: touched_at
+        )
+        store.append(
+            owner="u1", session_id="s1", content="用户住在上海。", importance=4,
+            refs=[{"event_seq": 1, "quote": "上海"}], created_at=NOW - 2 * 3600,
+        )
+        retriever = MemoryRetriever(
+            store, clock=lambda: NOW, config_reader=lambda: {}
+        )
+
+        hits = retriever.retrieve("u1")
+
+        assert len(hits) == 1
+        assert store.read_all()[0]["last_access"] == touched_at
+
+    def test_recent_hit_is_not_rewritten(self, tmp_path):
+        """限流：一小时内刚回写过，不再写盘（热路径不能每轮多一行）。"""
+        touched_at = NOW + 120
+        store = CuratedStore(
+            tmp_path / "curated.jsonl", clock_fn=lambda: touched_at
+        )
+        created = NOW - 60
+        store.append(
+            owner="u1", session_id="s1", content="用户住在上海。", importance=4,
+            refs=[{"event_seq": 1, "quote": "上海"}], created_at=created,
+        )
+        retriever = MemoryRetriever(
+            store, clock=lambda: NOW, config_reader=lambda: {}
+        )
+
+        retriever.retrieve("u1")
+
+        # 没回写 → last_access 仍是创建时间（不是 store 时钟的 touched_at）
+        assert store.read_all()[0]["last_access"] == created
