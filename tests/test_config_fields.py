@@ -113,3 +113,25 @@ def test_persona_domain_has_format_toggle():
     fmt = next(f for f in FIELDS["persona"] if f.key == "format")
     assert fmt.type == "select"
     assert set(fmt.choices) >= {"markdown", "text"}
+
+
+def test_memory_params_are_declared_and_match_defaults():
+    """M1-10：记忆参数要能在面板改；默认值必须与 default.py 一致。"""
+    from core.config.default import DEFAULT_CONFIG
+
+    by_key = {f.key: f for f in FIELDS["config"]}
+    expected = {
+        "llm.context_token_budget": DEFAULT_CONFIG["llm"]["context_token_budget"],
+        "memory.half_life_days": DEFAULT_CONFIG["memory"]["half_life_days"],
+        "memory.forget_threshold": DEFAULT_CONFIG["memory"]["forget_threshold"],
+        "memory.min_age_for_forget_days": DEFAULT_CONFIG["memory"]["min_age_for_forget_days"],
+        "memory.importance_never_forget": DEFAULT_CONFIG["memory"]["importance_never_forget"],
+        "memory.extract_idle_minutes": DEFAULT_CONFIG["memory"]["extract_idle_minutes"],
+        "memory.consolidate_interval_hours": DEFAULT_CONFIG["memory"]["consolidate_interval_hours"],
+        "memory.consolidate_event_threshold": DEFAULT_CONFIG["memory"]["consolidate_event_threshold"],
+        "memory.retrieve_top_k": DEFAULT_CONFIG["memory"]["retrieve_top_k"],
+        "memory.retrieve_token_budget": DEFAULT_CONFIG["memory"]["retrieve_token_budget"],
+    }
+    for key, default in expected.items():
+        assert key in by_key, f"面板缺少字段 {key}"
+        assert by_key[key].default == default, f"{key} 默认值与 default.py 不一致"
