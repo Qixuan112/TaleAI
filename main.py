@@ -418,6 +418,7 @@ def _build(bus: EventBus | None = None):
     # session.closed），任务本体按游标从 events.jsonl 取（§18.4）。
     curated = CuratedStore(Path(__file__).parent / "data" / "memory" / "curated.jsonl")
     from core.llm.memory_llm import MemoryLLM
+    from core.memory.retriever import MemoryRetriever
 
     memory_worker = MemoryWorker(
         store=store, eventlog=eventlog, llm=MemoryLLM(curated), bus=bus,
@@ -430,7 +431,7 @@ def _build(bus: EventBus | None = None):
     stream = LogStream()
     stream.subscribe_bus(bus)
 
-    bot = ChatLLM(bus=bus)
+    bot = ChatLLM(bus=bus, memory_retriever=MemoryRetriever(curated))
 
     # 第 8 步：适配器名册 + Router
     registry = AdapterRegistry()
