@@ -21,6 +21,10 @@ DEFAULT_CONFIG = {
         "history_keep_messages": 10,
         "history_lookback_extra": 5,
         "max_agent_steps": 3,  # FC 循环上限（§19-2：全局 3 轮不变）
+        # 动态块总预算（§19-17）：chat_env + memory_hits + unread_inbox 合计。
+        # 超限按优先级（order 小的先保）截断，从旧到新丢；system 不参与。
+        # 先拍 3000，等真模型评测再调（§20 的待办之一）。
+        "context_token_budget": 3000,
     },
     # 角色配置
     "bot": {
@@ -39,7 +43,7 @@ DEFAULT_CONFIG = {
     # 记忆系统配置（M1 新增）
     "memory": {
         # 衰减参数
-        "half_life_days": 30,  # 半衰期：30 天后 importance 权重减半
+        "half_life_days": 2,  # 半衰期：2 天衰减一个周期（用户 2026-11-08 拍板）
         "forget_threshold": 0.5,  # 遗忘阈值：score < 0.5 且超龄 → 打墓碑
         "min_age_for_forget_days": 30,  # 最小遗忘年龄：新记忆不会被立刻忘掉
         "importance_never_forget": 4,  # importance ≥ 4 永不自动遗忘

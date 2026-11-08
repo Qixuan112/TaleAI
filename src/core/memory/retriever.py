@@ -31,7 +31,7 @@ logger.addHandler(logging.NullHandler())
 
 DEFAULT_TOP_K = 20
 DEFAULT_TOKEN_BUDGET = 2000
-DEFAULT_HALF_LIFE_DAYS = 30.0
+DEFAULT_HALF_LIFE_DAYS = 2.0
 
 #: last_access 回写的最小间隔（秒）。热路径限流用。
 LAST_ACCESS_REFRESH_SECONDS = 3600.0

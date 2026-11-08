@@ -29,7 +29,7 @@ from core.memory.store import CuratedStore
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
 
-DEFAULT_HALF_LIFE_DAYS = 30.0
+DEFAULT_HALF_LIFE_DAYS = 2.0
 DEFAULT_FORGET_THRESHOLD = 0.5
 DEFAULT_MIN_AGE_DAYS = 30.0
 DEFAULT_NEVER_FORGET = 4

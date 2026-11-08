@@ -681,3 +681,87 @@ def test_chat_message_carries_unread_inbox():
     last = msgs[-1]["content"]
     assert "我在另一个会话说过这件事" in last
     assert last.endswith("在吗")
+
+
+# ---------- M1-09：总预算与分区截断 ----------
+
+
+def _block(name, order, content):
+    return ContextBlock(name=name, kind="dynamic", order=order, content=content)
+
+
+def test_budget_none_means_no_limit():
+    asm = make_assembler()
+    blocks = [_block("memory_hits", 30, "记忆一\n记忆二"),
+              _block("unread_inbox", 40, "旧事\n新事")]
+
+    text = asm.render_reminder(blocks)
+
+    assert "记忆二" in text and "新事" in text
+
+
+def test_budget_keeps_priority_block_first():
+    """order 小的先保：memory_hits（30）优先于 unread_inbox（40）。"""
+    asm = make_assembler()
+    memory = "记忆一\n记忆二\n记忆三"   # 11 字
+    unread = "旧事一\n旧事二\n新事"
+    blocks = [_block("memory_hits", 30, memory),
+              _block("unread_inbox", 40, unread)]
+
+    text = asm.render_reminder(blocks, total_budget=12)
+
+    assert "记忆三" in text       # 高优先级整块保住
+    assert "新事" not in text     # 低优先级整块让位
+
+
+def test_budget_truncates_memory_from_tail():
+    """memory_hits 已按分数降序：丢尾部 = 丢低分。"""
+    asm = make_assembler()
+    blocks = [_block("memory_hits", 30, "记忆一\n记忆二\n记忆三")]
+
+    text = asm.render_reminder(blocks, total_budget=9)
+
+    assert "记忆一" in text and "记忆二" in text
+    assert "记忆三" not in text
+
+
+def test_budget_truncates_unread_from_head():
+    """unread 是旧→新排序：丢头部 = 丢旧事，保住最新。"""
+    asm = make_assembler()
+    blocks = [_block("unread_inbox", 40, "旧事一\n旧事二\n新事")]
+
+    text = asm.render_reminder(blocks, total_budget=8)
+
+    assert "旧事二" not in text
+    assert "新事" in text
+
+
+def test_chat_uses_context_token_budget():
+    """ChatLLM 走配置预算；预算极小时动态块整体让位，提问本身不受影响。"""
+    retriever = FakeRetriever([{"content": "用户住在上海。"}])
+    bot = make_bot()
+    bot.context = ContextAssembler(clock=lambda: FIXED, memory_retriever=retriever)
+    bot.context_token_budget = 5
+
+    msgs = bot.assemble_messages("你好", session=SessionContext(owner="u1"))
+
+    last = msgs[-1]["content"]
+    assert last == "你好"           # reminder 为空
+    assert "用户住在上海" not in last
+
+
+def test_system_stays_byte_stable_under_budget():
+    """截断只动动态块：system 必须仍是人格提示词原文。"""
+    bot = make_bot()
+    bot.context_token_budget = 5
+
+    msgs = bot.assemble_messages("你好")
+
+    assert msgs[0]["content"] == bot.persona.build_system_prompt()
+
+
+def test_default_context_token_budget():
+    """§19-17：总预算写 config（先拍 3000）；锁住默认值防漂移。"""
+    from core.config.default import DEFAULT_CONFIG
+
+    assert DEFAULT_CONFIG["llm"]["context_token_budget"] == 3000

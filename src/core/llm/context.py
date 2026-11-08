@@ -27,6 +27,15 @@ logger.addHandler(logging.NullHandler())
 
 _WEEKDAYS = "一二三四五六日"
 
+#: 这些源的条目按「从旧到新」排列，截断时丢头部（旧）、保尾部（新）。
+#: 其余源默认保头部（memory_hits 已按分数从高到低排，丢尾部 = 丢低分）。
+_TRUNCATE_FROM_HEAD = {"unread_inbox"}
+
+
+def _estimate_tokens(text: str) -> int:
+    """token 粗估：中文约 1 字 1 token。宁可高估，不撑爆上下文。"""
+    return len(text)
+
 #: 动态块的开/闭标记（大小写不敏感）。用户/历史文本里出现它，说明这话想冒充
 #: 系统块——转义掉，别让模型把"用户说的话"读成"系统给的指示"。
 _SYSTEM_MARKER = re.compile(r"<(/?)system_reminder", re.IGNORECASE)
@@ -325,10 +334,17 @@ class ContextAssembler:
         blocks.sort(key=lambda b: b.order)
         return blocks
 
-    def render_reminder(self, blocks: list[ContextBlock]) -> str:
+    def render_reminder(
+        self, blocks: list[ContextBlock], total_budget: int | None = None
+    ) -> str:
         """把动态块渲染成一个 <system_reminder> 文本块。
 
         没有动态块（或内容全空）→ 返回空串，调用方据此不拼任何东西。
+
+        total_budget（§19-17）：动态块总 token 预算。None / <=0 = 不限制
+        （测试与旧调用保持原行为）。超限时按 block.order 优先级依次保留，
+        装不下的块按行截断——unread_inbox 从旧到新丢（保最新），其余块
+        保留头部（memory_hits 已按分数降序，丢尾部 = 丢低分）。
 
         ⚠️ 契约（M1 预防）：任何将来把**用户原文/记忆原文**塞进动态块的 builder
         （M1 的 memory_hits 等），必须先经 escape_tag_markers——否则一段含
@@ -338,5 +354,64 @@ class ContextAssembler:
         dynamic = [b for b in blocks if b.kind == "dynamic" and b.content.strip()]
         if not dynamic:
             return ""
-        body = "\n".join(b.content.strip() for b in dynamic)
+
+        # 优先级：order 小的先保（chat_env > memory_hits > unread_inbox）。
+        # 这正是 §19-17 的「sessions 摘要 > memory > 跨会话事件」在当前源上的映射。
+        ordered = sorted(dynamic, key=lambda block: block.order)
+
+        if total_budget is None or total_budget <= 0:
+            body = "\n".join(block.content.strip() for block in ordered)
+            return f"<system_reminder>\n{body}\n</system_reminder>"
+
+        remaining = total_budget
+        parts: list[str] = []
+        for block in ordered:
+            if remaining <= 0:
+                break
+            text = block.content.strip()
+            cost = _estimate_tokens(text)
+            if cost <= remaining:
+                parts.append(text)
+                remaining -= cost
+                continue
+            trimmed = self._truncate_block(block, remaining)
+            trimmed = trimmed.strip()
+            if trimmed:
+                parts.append(trimmed)
+                remaining -= _estimate_tokens(trimmed)
+
+        if not parts:
+            return ""
+        body = "\n".join(parts)
         return f"<system_reminder>\n{body}\n</system_reminder>"
+
+    @staticmethod
+    def _truncate_block(block: ContextBlock, budget: int) -> str:
+        """按行截断一个块到预算内；第一行视为标题，尽量保留。"""
+        lines = block.content.strip().split("\n")
+        if not lines or budget <= 0:
+            return ""
+
+        if block.name in _TRUNCATE_FROM_HEAD:
+            header, body = lines[0], lines[1:]
+            kept: list[str] = []
+            used = _estimate_tokens(header)
+            for line in reversed(body):
+                cost = _estimate_tokens(line) + 1
+                if used + cost > budget:
+                    break
+                kept.insert(0, line)
+                used += cost
+            if kept:
+                return "\n".join([header, *kept])
+            return header if used <= budget else ""
+
+        kept = []
+        used = 0
+        for line in lines:
+            cost = _estimate_tokens(line) + 1
+            if used + cost > budget:
+                break
+            kept.append(line)
+            used += cost
+        return "\n".join(kept)

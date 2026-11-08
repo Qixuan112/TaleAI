@@ -113,3 +113,10 @@ class TestConfig:
         )
 
         assert consolidator.run()["forgotten"] == []
+
+
+def test_default_half_life_is_two_days():
+    """用户 2026-11-08 拍板：记忆两天衰减一个周期；锁住默认值防漂移。"""
+    from core.config.default import DEFAULT_CONFIG
+
+    assert DEFAULT_CONFIG["memory"]["half_life_days"] == 2
