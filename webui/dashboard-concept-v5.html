@@ -42,6 +42,7 @@
   --faint: #9b968b;
   --line: #e3ded3;
   --line-soft: #ede8df;
+  --line-strong: #d8d4cb;
 
   --accent: #4f5fb5;
   --accent-strong: #3f4f9e;
@@ -79,6 +80,7 @@
   --faint: #746f65;
   --line: #2c2a25;
   --line-soft: #24221e;
+  --line-strong: #3b3831;
 
   --accent: #a4b0ef;
   --accent-strong: #bcc5f6;
@@ -333,6 +335,54 @@ a { color: inherit; }
   box-shadow: inset 2px 0 0 var(--accent);
 }
 .side-nav a.active svg { color: var(--accent); }
+
+/* 仪表盘的二级入口：收在侧栏里，主页面就不必再堆一排卡片 */
+.side-subnav {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 0 10px 6px 20px;
+  padding-left: 10px;
+  border-left: 1px solid var(--line-soft);
+}
+.side-subnav a {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  padding: 0 8px;
+  border-radius: 6px;
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 12px;
+  white-space: nowrap;
+  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+.side-subnav a:hover { background: var(--surface-2); color: var(--ink); }
+.side-subnav a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.side-subnav a.active {
+  color: var(--accent);
+  background: var(--accent-soft);
+  font-weight: 500;
+}
+.side-subnav .sub-dot {
+  flex: none;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--faint);
+}
+.side-subnav a.active .sub-dot { background: var(--accent); }
+.side-subnav .sub-label { flex: 1; min-width: 0; }
+.side-subnav .sub-badge {
+  flex: none;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-size: 9px;
+  line-height: 15px;
+}
 
 .side-foot {
   margin-top: auto;
@@ -1199,6 +1249,143 @@ a { color: inherit; }
 }
 .colophon .sep { opacity: .5; }
 
+/* ============ 概览页的"最近"预览：两块，不抢首屏 ============ */
+.preview-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 36px;
+  margin-top: 26px;
+}
+.preview-block { min-width: 0; }
+.preview-head {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+}
+.preview-head h2 { margin: 0; font-size: 12.5px; font-weight: 600; color: var(--ink); flex: none; }
+.preview-note { font-size: 9.5px; color: var(--faint); white-space: nowrap; }
+.preview-link {
+  margin-left: auto;
+  font-size: 10.5px;
+  color: var(--accent);
+  text-decoration: none;
+  white-space: nowrap;
+}
+.preview-link:hover { text-decoration: underline; }
+.preview-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+.chapter.bare { margin-bottom: 0; }
+
+/* ============ 二级页 ============ */
+.page-section { width: 100%; max-width: 900px; margin: 0 auto; }
+.page-section-narrow { max-width: 720px; }
+.page-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+  padding-bottom: 14px;
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--line);
+}
+.page-kicker {
+  margin: 0 0 3px;
+  font-size: 9.5px;
+  letter-spacing: .12em;
+  color: var(--faint);
+}
+.page-head h2 {
+  margin: 0;
+  font-size: 19px;
+  font-weight: 600;
+  line-height: 1.35;
+  letter-spacing: -.01em;
+  color: var(--ink);
+}
+.page-sub { margin: 4px 0 0; font-size: 12px; line-height: 1.6; color: var(--muted); }
+.page-back {
+  flex: none;
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--accent);
+  text-decoration: none;
+  white-space: nowrap;
+}
+.page-back:hover { text-decoration: underline; }
+.page-back:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+
+.toolbar { display: flex; align-items: center; gap: 12px; margin: 0 0 12px; }
+.toolbar input {
+  flex: 1;
+  min-width: 0;
+  height: 36px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: 12.5px;
+  outline: none;
+  transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
+}
+.toolbar input::placeholder { color: var(--faint); }
+.toolbar input:hover { border-color: var(--line-strong); }
+.toolbar input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.toolbar-note { flex: none; font-size: 10px; color: var(--faint); white-space: nowrap; }
+.text-btn {
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-size: 11px;
+  padding: 0 2px;
+  cursor: pointer;
+}
+.text-btn:hover { text-decoration: underline; }
+.text-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+
+.section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding-bottom: 8px;
+  margin-bottom: 2px;
+  border-bottom: 1px solid var(--line);
+}
+.section-head h2 { margin: 0; font-size: 12.5px; font-weight: 600; color: var(--ink); }
+.section-head .head-link {
+  flex: none;
+  font-size: 10.5px;
+  color: var(--accent);
+  text-decoration: none;
+  white-space: nowrap;
+}
+.section-head .head-link:hover { text-decoration: underline; }
+.section-head .head-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+
+.activity-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+  gap: 44px;
+}
+.activity-grid .chapter.bare { margin-bottom: 0; }
+
+.usage-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+  gap: 14px;
+}
+.page-foot-note { margin: 18px 0 0; font-size: 10.5px; line-height: 1.7; color: var(--faint); }
+
+.system-card { padding: 6px 18px; }
+.system-links { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 16px; font-size: 11px; }
+.system-links a { color: var(--accent); text-decoration: none; }
+.system-links a:hover { text-decoration: underline; }
+.system-links a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+
 .toast {
   position: fixed;
   left: 50%;
@@ -1264,6 +1451,10 @@ a { color: inherit; }
   .status-item:nth-child(4) { border-top: 1px solid var(--line-soft); }
   .scan-grid { grid-template-columns: 1fr; }
   .quick-card { grid-column: auto; }
+  .preview-grid { grid-template-columns: 1fr; gap: 26px; }
+  .activity-grid { grid-template-columns: 1fr; gap: 28px; }
+  .usage-grid { grid-template-columns: 1fr; }
+  .page-section, .page-section-narrow { max-width: none; }
 }
 
 @media (max-width: 620px) {
@@ -1289,6 +1480,10 @@ a { color: inherit; }
   .scan-card { padding: 14px 15px; }
   .chapter-head .note { display: none; }
   .entry { grid-template-columns: 50px 44px minmax(0, 1fr); gap: 7px; }
+  .page-head { gap: 10px; }
+  .page-head h2 { font-size: 17px; }
+  .toolbar { flex-wrap: wrap; gap: 7px; }
+  .toolbar-note { width: 100%; }
   .colophon { margin-top: 28px; }
 }
 
@@ -1421,7 +1616,8 @@ a { color: inherit; }
           </svg>
           <span>聊天</span>
         </a>
-        <a class="active" href="/dashboard" aria-current="page">
+        <a class="active" href="/dashboard"
+           @click.prevent="navigate('overview')">
           <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
                stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <rect x="3.5" y="3.5" width="7" height="7" rx="1.2"/>
@@ -1431,6 +1627,18 @@ a { color: inherit; }
           </svg>
           <span>仪表盘</span>
         </a>
+        <div class="side-subnav" aria-label="仪表盘子页">
+          <a v-for="item in subnav" :key="item.key" :href="subnavHref(item.key)"
+             :class="{ active: view === item.key }"
+             :aria-current="view === item.key ? 'page' : null"
+             @click="navigate(item.key)">
+            <span class="sub-dot" aria-hidden="true"></span>
+            <span class="sub-label">{{ item.label }}</span>
+            <span class="sub-badge" v-if="item.key === 'overview' && alerts.length"
+                  :title="alerts.length + ' 项待处理'"
+                  :aria-label="alerts.length + ' 项待处理'">{{ alerts.length }}</span>
+          </a>
+        </div>
         <a href="/settings">
           <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
                stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -1481,42 +1689,58 @@ a { color: inherit; }
         </section>
 
         <template v-else>
-          <status-strip :items="statusItems"></status-strip>
+          <template v-if="view === 'overview'">
+            <status-strip :items="statusItems"></status-strip>
 
-          <div class="hero-grid">
-            <today-panel :today="d.today" :delta-text="todayDeltaText"
-                         :delta-class="todayDeltaClass" :summary="todaySummary"
-                         :mini="todayMini"></today-panel>
-            <pulse-chart :series="series" :metric="metric"
-                         @update:metric="metric = $event"></pulse-chart>
-          </div>
-
-          <alerts-panel :alerts="alerts"></alerts-panel>
-
-          <kpi-row :items="kpis"></kpi-row>
-
-          <div class="scan-grid">
-            <llm-panel :llm="d.llm"></llm-panel>
-            <distribution-panel :counts="d.platform_counts"></distribution-panel>
-            <quick-panel :empty="isEmpty" :setup="needsSetup" :bot-name="botName"
-                         @refresh="load" @copy="copySummary"></quick-panel>
-          </div>
-
-          <div class="section-rule">细节</div>
-
-          <div class="columns">
-            <div class="col">
-              <memory-list :memories="memories" :titles="sessionTitles"
-                           :total="d.counts.memories" :today-count="d.today.memories"></memory-list>
-              <session-list :sessions="sessions" :total="d.counts.web_sessions"
-                            @open="openSession"></session-list>
+            <div class="hero-grid">
+              <today-panel :today="d.today" :delta-text="todayDeltaText"
+                           :delta-class="todayDeltaClass" :summary="todaySummary"
+                           :mini="todayMini"></today-panel>
+              <pulse-chart :series="series" :metric="metric"
+                           @update:metric="metric = $event"></pulse-chart>
             </div>
-            <div class="col">
-              <event-list :events="events" :sessions="sessions" :bot-name="botName"
-                          :today-count="d.today.events"></event-list>
-              <system-panel :rows="systemRows"></system-panel>
+
+            <alerts-panel :alerts="alerts"></alerts-panel>
+
+            <div class="preview-grid">
+              <section class="preview-block">
+                <div class="preview-head">
+                  <h2>最近记住</h2>
+                  <span class="preview-note">{{ fmtNum(d.counts.memories) }} 条</span>
+                  <a class="preview-link" href="#/memory" @click="navigate('memory')">全部记忆 →</a>
+                </div>
+                <memory-list :memories="memories.slice(0, 3)" :titles="sessionTitles"
+                             :total="d.counts.memories" :today-count="d.today.memories"
+                             :bare="true"></memory-list>
+              </section>
+
+              <section class="preview-block">
+                <div class="preview-head">
+                  <h2>最近发生</h2>
+                  <span class="preview-note">{{ fmtNum(d.today.events) }} 起 · 今日</span>
+                  <a class="preview-link" href="#/activity" @click="navigate('activity')">全部动态 →</a>
+                </div>
+                <event-list :events="events.slice(0, 4)" :sessions="sessions" :bot-name="botName"
+                            :today-count="d.today.events" :bare="true"></event-list>
+              </section>
             </div>
-          </div>
+          </template>
+
+          <memory-page v-else-if="view === 'memory'"
+                       :memories="memories" :titles="sessionTitles"
+                       :total="d.counts.memories" :today-count="d.today.memories"
+                       :forgotten="d.counts.memories_forgotten"
+                       :last-at="d.memory.last_at" :bot-name="botName"></memory-page>
+
+          <activity-page v-else-if="view === 'activity'"
+                         :events="events" :sessions="sessions" :bot-name="botName"
+                         :today-count="d.today.events"
+                         @open-session="openSession"></activity-page>
+
+          <usage-page v-else-if="view === 'usage'"
+                      :llm="d.llm" :counts="d.platform_counts"></usage-page>
+
+          <system-page v-else :rows="systemRows" :bot-name="botName"></system-page>
 
           <footer class="colophon">
             <span v-if="d.demo">示例数据 · 概念页可直接打开</span>
@@ -1672,16 +1896,6 @@ a { color: inherit; }
   </section>
 </script>
 
-<script type="text/x-template" id="tpl-kpi-row">
-  <section class="card kpi-row" aria-label="累计数据">
-    <div v-for="item in items" :key="item.label" class="kpi">
-      <div class="kpi-label">{{ item.label }}</div>
-      <div class="kpi-value">{{ fmtNum(item.value) }}</div>
-      <div class="kpi-foot"><span :class="item.footClass">{{ item.foot }}</span></div>
-    </div>
-  </section>
-</script>
-
 <script type="text/x-template" id="tpl-llm-panel">
   <section class="card scan-card llm-card">
     <div class="card-head"><h2>LLM 用量</h2><span class="note">今天</span></div>
@@ -1739,55 +1953,9 @@ a { color: inherit; }
   </section>
 </script>
 
-<script type="text/x-template" id="tpl-quick-panel">
-  <section class="card scan-card quick-card">
-    <div class="card-head">
-      <h2>{{ empty ? (setup ? "开始使用" : "准备好了") : "快捷入口" }}</h2>
-      <span class="note" v-if="empty && setup">三步</span>
-    </div>
-
-    <div v-if="empty && setup" class="onboard">
-      <a href="/settings" class="step">
-        <span class="step-index">1</span>
-        <span><b>配置模型</b><small>填网关地址与密钥</small></span>
-      </a>
-      <a href="/" class="step">
-        <span class="step-index">2</span>
-        <span><b>和{{ botName }}说句话</b><small>首条消息会开启会话</small></span>
-      </a>
-      <a href="/logs" class="step">
-        <span class="step-index">3</span>
-        <span><b>看它怎么想</b><small>日志页有实时事件</small></span>
-      </a>
-    </div>
-
-    <div v-else-if="empty" class="ready">
-      <p class="ready-note"><b>已经配置好了。</b>去和{{ botName }}说第一句话吧。</p>
-      <div class="quick-links">
-        <a href="/" class="quick-primary">打开聊天 →</a>
-        <button type="button" class="quick-action" @click="$emit('refresh')">刷新数据</button>
-      </div>
-    </div>
-
-    <div v-else class="quick-card-body">
-      <div class="quick-nav">
-        <a href="/">聊天</a>
-        <a href="/settings">设置</a>
-        <a href="/logs">日志</a>
-      </div>
-      <div class="quick-actions">
-        <button type="button" class="quick-action" @click="$emit('refresh')">刷新数据</button>
-        <button type="button" class="quick-action" @click="$emit('copy')">复制摘要</button>
-      </div>
-    </div>
-
-    <p class="quick-note">只读面板 · 每 30 秒自动刷新</p>
-  </section>
-</script>
-
 <script type="text/x-template" id="tpl-memory-list">
-  <section class="chapter">
-    <div class="chapter-head">
+  <section class="chapter" :class="{ bare: bare }">
+    <div class="chapter-head" v-if="!bare">
       <span class="index">01</span><h2>记忆</h2>
       <span class="note">{{ total ? "共 " + fmtNum(total) + " 条 · 今日 +" + fmtNum(todayCount) : "" }}</span>
     </div>
@@ -1830,8 +1998,8 @@ a { color: inherit; }
 </script>
 
 <script type="text/x-template" id="tpl-event-list">
-  <section class="chapter">
-    <div class="chapter-head">
+  <section class="chapter" :class="{ bare: bare }">
+    <div class="chapter-head" v-if="!bare">
       <span class="index">02</span><h2>最近发生</h2>
       <span class="note">{{ fmtNum(todayCount) }} 起 · 今日</span>
       <a class="head-link" href="/logs">全部 →</a>
@@ -1853,8 +2021,8 @@ a { color: inherit; }
 </script>
 
 <script type="text/x-template" id="tpl-session-list">
-  <section class="chapter">
-    <div class="chapter-head">
+  <section class="chapter" :class="{ bare: bare }">
+    <div class="chapter-head" v-if="!bare">
       <span class="index">03</span><h2>会话</h2>
       <span class="note">网页 {{ fmtNum(total) }} 个</span>
       <a class="head-link" href="/">打开聊天 →</a>
@@ -1880,8 +2048,8 @@ a { color: inherit; }
 </script>
 
 <script type="text/x-template" id="tpl-system-panel">
-  <section class="chapter">
-    <div class="chapter-head">
+  <section class="chapter" :class="{ bare: bare }">
+    <div class="chapter-head" v-if="!bare">
       <span class="index">04</span><h2>系统</h2>
     </div>
     <dl class="system">
@@ -1895,6 +2063,114 @@ a { color: inherit; }
         </dd>
       </div>
     </dl>
+  </section>
+</script>
+
+<script type="text/x-template" id="tpl-memory-page">
+  <section class="page-section">
+    <header class="page-head">
+      <div>
+        <p class="page-kicker">记忆</p>
+        <h2>{{ botName }} 记住的事</h2>
+        <p class="page-sub">
+          共 {{ fmtNum(total) }} 条 · 今日 +{{ fmtNum(todayCount) }} · 遗忘 {{ fmtNum(forgotten) }}
+          <template v-if="lastAt"> · 上次提炼 {{ relTime(lastAt) }}</template>
+          <template v-if="total > memories.length && memories.length"> · 展示最近 {{ memories.length }} 条</template>
+        </p>
+      </div>
+      <a class="page-back" href="#/">← 回概览</a>
+    </header>
+
+    <div class="toolbar">
+      <input type="search" v-model="query"
+             placeholder="搜索记忆内容、标签或来源会话…" aria-label="搜索记忆">
+      <span class="toolbar-note">{{ filtered.length }} 条</span>
+    </div>
+
+    <p v-if="!memories.length" class="empty-note">
+      还没有提炼出记忆——聊一会儿，静默之后会自动提炼。
+      <a href="/">去聊天 →</a>
+    </p>
+    <p v-else-if="!filtered.length" class="empty-note">
+      没有匹配的记忆。
+      <button type="button" class="text-btn" @click="query = ''">清空搜索</button>
+    </p>
+    <memory-list v-else :memories="filtered" :titles="titles"
+                 :total="total" :today-count="todayCount" :bare="true"></memory-list>
+  </section>
+</script>
+
+<script type="text/x-template" id="tpl-activity-page">
+  <section class="page-section">
+    <header class="page-head">
+      <div>
+        <p class="page-kicker">动态</p>
+        <h2>最近的动静</h2>
+        <p class="page-sub">今日 {{ fmtNum(todayCount) }} 起 · 展示最近 {{ events.length }} 条</p>
+      </div>
+      <a class="page-back" href="#/">← 回概览</a>
+    </header>
+
+    <div class="activity-grid">
+      <section>
+        <div class="section-head">
+          <h2>事件</h2>
+          <a class="head-link" href="/logs">去日志 →</a>
+        </div>
+        <event-list :events="events" :sessions="sessions" :bot-name="botName"
+                    :today-count="todayCount" :bare="true"></event-list>
+      </section>
+
+      <aside>
+        <div class="section-head">
+          <h2>会话</h2>
+          <a class="head-link" href="/">打开聊天 →</a>
+        </div>
+        <session-list :sessions="sessions" :total="sessions.length" :bare="true"
+                      @open="$emit('open-session', $event)"></session-list>
+      </aside>
+    </div>
+  </section>
+</script>
+
+<script type="text/x-template" id="tpl-usage-page">
+  <section class="page-section">
+    <header class="page-head">
+      <div>
+        <p class="page-kicker">用量</p>
+        <h2>模型与平台</h2>
+        <p class="page-sub">今天的调用、token 与消息来源</p>
+      </div>
+      <a class="page-back" href="#/">← 回概览</a>
+    </header>
+
+    <div class="usage-grid">
+      <llm-panel :llm="llm"></llm-panel>
+      <distribution-panel :counts="counts"></distribution-panel>
+    </div>
+    <p class="page-foot-note">统计口径：本地自然日；token 来自网关返回的 usage，取不到时按 0 计。</p>
+  </section>
+</script>
+
+<script type="text/x-template" id="tpl-system-page">
+  <section class="page-section page-section-narrow">
+    <header class="page-head">
+      <div>
+        <p class="page-kicker">系统</p>
+        <h2>配置与连接</h2>
+        <p class="page-sub">只读快照 · 不在仪表盘里改任何设置</p>
+      </div>
+      <a class="page-back" href="#/">← 回概览</a>
+    </header>
+
+    <section class="card system-card">
+      <system-panel :rows="rows" :bare="true"></system-panel>
+    </section>
+
+    <div class="system-links">
+      <a href="/settings">去设置改模型 / QQ →</a>
+      <a href="/logs">看实时日志 →</a>
+    </div>
   </section>
 </script>
 
@@ -1930,7 +2206,7 @@ a { color: inherit; }
    数据接口是 /api/overview；概念页在没有后端时退回示例数据（v5 的约定）。
    ============================================================ */
 
-const { createApp, ref, computed, onMounted, onBeforeUnmount } = Vue;
+const { createApp, ref, computed, watch, onMounted, onBeforeUnmount } = Vue;
 
 const REFRESH_MS = 30000;
 const FETCH_TIMEOUT_MS = 10000;
@@ -2016,6 +2292,14 @@ function qqView(qq) {
   if (qq.state === "failed") return { text: "启动失败", level: "bad" };
   if (qq.enabled === false) return { text: "未启用", level: "" };
   return { text: "已停止", level: "warn" };
+}
+
+// 概念页是单文件，用 hash 做二级路由：file:// 和静态服务器都能用。
+// 生产版以后要真路径，只需在 FastAPI 加 /dashboard/<page> 重定向到
+// /static/dashboard.html#/<page>；前端这套不用改。
+function viewFromHash() {
+  const raw = String(location.hash || "").replace(/^#\/?/, "").replace(/\/$/, "");
+  return ["memory", "activity", "usage", "system"].indexOf(raw) >= 0 ? raw : "overview";
 }
 
 /* ---------- 空数据：接口还没回来时，模板也能安全渲染 ---------- */
@@ -2120,16 +2404,6 @@ function mockData() {
     ],
     recent_memories: [
       {
-        id: "m1",
-        content: "下周去北京，周二早上 7:30 的高铁。",
-        quote: "周二早上七点半的高铁，别让我睡过头。",
-        importance: 5,
-        tags: ["计划", "出行"],
-        created_at: NOW - 2 * DAY,
-        last_access: NOW - 3600,
-        session_id: "web:beijing",
-      },
-      {
         id: "m2",
         content: "最近在改 TaleAI 的面板，反复提到「留白」和「一致性」。",
         quote: "我觉得面板设计缺乏一点呼吸感。",
@@ -2138,6 +2412,16 @@ function mockData() {
         created_at: NOW - 2 * 3600,
         last_access: NOW - 1800,
         session_id: "web:panel",
+      },
+      {
+        id: "m1",
+        content: "下周去北京，周二早上 7:30 的高铁。",
+        quote: "周二早上七点半的高铁，别让我睡过头。",
+        importance: 5,
+        tags: ["计划", "出行"],
+        created_at: NOW - 2 * DAY,
+        last_access: NOW - 3600,
+        session_id: "web:beijing",
       },
       {
         id: "m3",
@@ -2158,6 +2442,46 @@ function mockData() {
         created_at: NOW - 9 * DAY,
         last_access: NOW - 9 * DAY,
         session_id: "web:midnight",
+      },
+      {
+        id: "m5",
+        content: "周末通常起得晚，上午十点前别安排事情。",
+        quote: "周末让我睡到自然醒吧。",
+        importance: 2,
+        tags: ["习惯"],
+        created_at: NOW - 12 * DAY,
+        last_access: NOW - 12 * DAY,
+        session_id: "web:midnight",
+      },
+      {
+        id: "m6",
+        content: "对猫毛过敏，但还是很喜欢团子。",
+        quote: "我过敏，但还是想摸它。",
+        importance: 3,
+        tags: ["生活", "偏好"],
+        created_at: NOW - 15 * DAY,
+        last_access: NOW - 15 * DAY,
+        session_id: "web:midnight",
+      },
+      {
+        id: "m7",
+        content: "做前端时习惯先画信息层级，再写样式。",
+        quote: "先把层级理清楚，样式自然就顺了。",
+        importance: 4,
+        tags: ["项目", "习惯"],
+        created_at: NOW - 18 * DAY,
+        last_access: NOW - 18 * DAY,
+        session_id: "web:panel",
+      },
+      {
+        id: "m8",
+        content: "不喜欢被连续追问，问题最好一次问清。",
+        quote: "别一句一句挤牙膏。",
+        importance: 3,
+        tags: ["偏好", "沟通"],
+        created_at: NOW - 22 * DAY,
+        last_access: NOW - 22 * DAY,
+        session_id: "web:panel",
       },
     ],
     sessions: [
@@ -2334,11 +2658,6 @@ const AlertsPanel = {
   template: "#tpl-alerts-panel",
 };
 
-const KpiRow = {
-  props: { items: { type: Array, default: function () { return []; } } },
-  template: "#tpl-kpi-row",
-};
-
 const LlmPanel = {
   props: { llm: { type: Object, default: function () { return {}; } } },
   computed: {
@@ -2374,22 +2693,13 @@ const DistributionPanel = {
   template: "#tpl-distribution-panel",
 };
 
-const QuickPanel = {
-  props: {
-    empty: { type: Boolean, default: false },
-    setup: { type: Boolean, default: false },
-    botName: { type: String, default: "塔利" },
-  },
-  emits: ["refresh", "copy"],
-  template: "#tpl-quick-panel",
-};
-
 const MemoryList = {
   props: {
     memories: { type: Array, default: function () { return []; } },
     titles: { type: Object, default: function () { return {}; } },
     total: { type: Number, default: 0 },
     todayCount: { type: Number, default: 0 },
+    bare: { type: Boolean, default: false },
   },
   data: function () { return { open: {} }; },
   methods: {
@@ -2413,6 +2723,7 @@ const EventList = {
     sessions: { type: Array, default: function () { return []; } },
     botName: { type: String, default: "塔利" },
     todayCount: { type: Number, default: 0 },
+    bare: { type: Boolean, default: false },
   },
   methods: {
     eventLabel: function (type) {
@@ -2445,14 +2756,80 @@ const SessionList = {
   props: {
     sessions: { type: Array, default: function () { return []; } },
     total: { type: Number, default: 0 },
+    bare: { type: Boolean, default: false },
   },
   emits: ["open"],
   template: "#tpl-session-list",
 };
 
 const SystemPanel = {
-  props: { rows: { type: Array, default: function () { return []; } } },
+  props: {
+    rows: { type: Array, default: function () { return []; } },
+    bare: { type: Boolean, default: false },
+  },
   template: "#tpl-system-panel",
+};
+
+/* ---------- 二级页：把细节从概览里搬出去 ---------- */
+
+const MemoryPage = {
+  components: { MemoryList: MemoryList },
+  props: {
+    memories: { type: Array, default: function () { return []; } },
+    titles: { type: Object, default: function () { return {}; } },
+    total: { type: Number, default: 0 },
+    todayCount: { type: Number, default: 0 },
+    forgotten: { type: Number, default: 0 },
+    lastAt: { type: Number, default: 0 },
+    botName: { type: String, default: "塔利" },
+  },
+  data: function () { return { query: "" }; },
+  computed: {
+    filtered: function () {
+      const q = this.query.trim().toLowerCase();
+      if (!q) return this.memories;
+      const titles = this.titles || {};
+      return this.memories.filter(function (m) {
+        const content = String(m.content || "").toLowerCase();
+        const tags = (m.tags || []).join(" ").toLowerCase();
+        const source = String(titles[m.session_id] || m.session_id || "").toLowerCase();
+        const quote = String(m.quote || "").toLowerCase();
+        return content.indexOf(q) >= 0 || tags.indexOf(q) >= 0 ||
+               source.indexOf(q) >= 0 || quote.indexOf(q) >= 0;
+      });
+    },
+  },
+  template: "#tpl-memory-page",
+};
+
+const ActivityPage = {
+  components: { EventList: EventList, SessionList: SessionList },
+  props: {
+    events: { type: Array, default: function () { return []; } },
+    sessions: { type: Array, default: function () { return []; } },
+    botName: { type: String, default: "塔利" },
+    todayCount: { type: Number, default: 0 },
+  },
+  emits: ["open-session"],
+  template: "#tpl-activity-page",
+};
+
+const UsagePage = {
+  components: { LlmPanel: LlmPanel, DistributionPanel: DistributionPanel },
+  props: {
+    llm: { type: Object, default: function () { return {}; } },
+    counts: { type: Object, default: function () { return {}; } },
+  },
+  template: "#tpl-usage-page",
+};
+
+const SystemPage = {
+  components: { SystemPanel: SystemPanel },
+  props: {
+    rows: { type: Array, default: function () { return []; } },
+    botName: { type: String, default: "塔利" },
+  },
+  template: "#tpl-system-page",
 };
 
 /* ============================================================
@@ -2465,14 +2842,16 @@ const App = {
     TodayPanel,
     PulseChart,
     AlertsPanel,
-    KpiRow,
     LlmPanel,
     DistributionPanel,
-    QuickPanel,
     MemoryList,
     EventList,
     SessionList,
     SystemPanel,
+    MemoryPage,
+    ActivityPage,
+    UsagePage,
+    SystemPage,
   },
 
   setup: function () {
@@ -2481,6 +2860,14 @@ const App = {
     const error = ref("");
     const lastSync = ref(0);
     const metric = ref("events");
+    const view = ref(viewFromHash());
+    const subnav = [
+      { key: "overview", label: "概览" },
+      { key: "memory", label: "记忆" },
+      { key: "activity", label: "动态" },
+      { key: "usage", label: "用量" },
+      { key: "system", label: "系统" },
+    ];
     const theme = ref(document.documentElement.getAttribute("data-theme") || "light");
     const drawerOpen = ref(false);
     const toast = ref({ show: false, text: "" });
@@ -2507,6 +2894,14 @@ const App = {
       const now = d.value.now || Date.now() / 1000;
       return greeting(new Date(now * 1000).getHours()) + " · " +
              monthDay(now) + " " + weekday(now);
+    });
+
+    const pageTitle = computed(function () {
+      const titles = {
+        overview: "仪表盘", memory: "记忆", activity: "动态",
+        usage: "用量", system: "系统",
+      };
+      return titles[view.value] || "仪表盘";
     });
 
     const syncText = computed(function () {
@@ -2613,43 +3008,7 @@ const App = {
       ];
     });
 
-    /* ---------- KPI / 分布 ---------- */
-
-    const kpis = computed(function () {
-      const c = d.value.counts;
-      const del = d.value.deltas;
-      const qqSessions = Number((d.value.platform_counts.qq || {}).sessions || 0);
-
-      function cls(n) {
-        if (n > 0) return "up";
-        if (n < 0) return "down";
-        return "flat";
-      }
-
-      return [
-        {
-          label: "会话", value: c.sessions,
-          foot: "网页 " + fmtNum(c.web_sessions) + " · QQ " + fmtNum(qqSessions),
-          footClass: "flat",
-        },
-        {
-          label: "消息", value: c.messages,
-          foot: "较昨天 " + signed(del.messages),
-          footClass: cls(del.messages),
-        },
-        {
-          label: "事件", value: c.events,
-          foot: "较昨天 " + signed(del.events),
-          footClass: cls(del.events),
-        },
-        {
-          label: "记忆", value: c.memories,
-          foot: "较昨天 " + signed(del.memories) +
-            (c.memories_forgotten ? " · 遗忘 " + fmtNum(c.memories_forgotten) : ""),
-          footClass: cls(del.memories),
-        },
-      ];
-    });
+    /* ---------- 记忆 / 事件 / 会话 ---------- */
 
     const alerts = computed(function () { return d.value.alerts || []; });
     const memories = computed(function () { return d.value.recent_memories || []; });
@@ -2662,16 +3021,6 @@ const App = {
         map[s.id] = s.title || s.id;
       });
       return map;
-    });
-
-    const isEmpty = computed(function () {
-      const c = d.value.counts;
-      return !c.messages && !c.events && sessions.value.length === 0;
-    });
-
-    const needsSetup = computed(function () {
-      const bot = d.value.bot || {};
-      return !d.value.llm_key_set || !bot.model || !bot.base_url;
     });
 
     const systemRows = computed(function () {
@@ -2766,6 +3115,52 @@ const App = {
       load();
     }
 
+    // 概念页是单文件：站内其他页面（/、/settings、/logs）打不开，别让用户
+    // 点了以后跳到 file:/// 根目录。正式页 demo=false，不拦。
+    function onDocumentClick(event) {
+      if (!d.value.demo) return;
+      const target = event.target;
+      const link = target && target.closest ? target.closest("a") : null;
+      if (!link) return;
+      const href = link.getAttribute("href") || "";
+      if (href === "/dashboard") return;  // 一级入口由 navigate 处理
+      if (href.startsWith("/") && !href.startsWith("//")) {
+        event.preventDefault();
+        showToast("概念页：接入应用后可打开 " + href);
+      }
+    }
+
+    /* ---------- hash 二级路由 ---------- */
+
+    function subnavHref(key) {
+      return key === "overview" ? "#/" : "#/" + key;
+    }
+
+    function scrollStageTop() {
+      const stage = document.querySelector(".stage");
+      if (stage) stage.scrollTop = 0;
+    }
+
+    function navigate(key) {
+      const target = subnavHref(key);
+      if (location.hash !== target) location.hash = target;
+      view.value = viewFromHash();
+      scrollStageTop();
+      if (narrow.value && drawerOpen.value) drawerOpen.value = false;
+    }
+
+    function onHashChange() {
+      view.value = viewFromHash();
+      scrollStageTop();
+      if (narrow.value && drawerOpen.value) drawerOpen.value = false;
+    }
+
+    // 页面标题跟着视图走；概念页再加"概念 v5"尾巴，避免和正式页混淆。
+    watch([view, botName, function () { return d.value.demo; }], function () {
+      document.title = botName.value + " · " + pageTitle.value +
+        (d.value.demo ? " · 概念 v5" : "");
+    }, { immediate: true });
+
     /* ---------- 侧栏 / 主题 ---------- */
 
     function isNarrow() {
@@ -2858,6 +3253,10 @@ const App = {
     }
 
     function openSession(session) {
+      if (d.value.demo) {
+        showToast("概念页：接入应用后可打开会话「" + (session.title || session.id) + "」");
+        return;
+      }
       try {
         localStorage.setItem("taleai.session_id", session.id);
       } catch (e) {}
@@ -2865,9 +3264,12 @@ const App = {
     }
 
     onMounted(function () {
+      onHashChange();
       load();
       window.addEventListener("keydown", onKeydown);
       window.addEventListener("resize", onResize);
+      window.addEventListener("hashchange", onHashChange);
+      document.addEventListener("click", onDocumentClick);
       document.addEventListener("visibilitychange", onVisibility);
     });
 
@@ -2876,6 +3278,8 @@ const App = {
       clearTimeout(toastTimer);
       window.removeEventListener("keydown", onKeydown);
       window.removeEventListener("resize", onResize);
+      window.removeEventListener("hashchange", onHashChange);
+      document.removeEventListener("click", onDocumentClick);
       document.removeEventListener("visibilitychange", onVisibility);
     });
 
@@ -2885,6 +3289,11 @@ const App = {
       loading: loading,
       error: error,
       metric: metric,
+      view: view,
+      subnav: subnav,
+      pageTitle: pageTitle,
+      subnavHref: subnavHref,
+      navigate: navigate,
       theme: theme,
       toast: toast,
       drawerOpen: drawerOpen,
@@ -2902,14 +3311,11 @@ const App = {
       todayDeltaClass: todayDeltaClass,
       todaySummary: todaySummary,
       todayMini: todayMini,
-      kpis: kpis,
       alerts: alerts,
       memories: memories,
       events: events,
       sessions: sessions,
       sessionTitles: sessionTitles,
-      isEmpty: isEmpty,
-      needsSetup: needsSetup,
       systemRows: systemRows,
       load: load,
       toggleSidebar: toggleSidebar,
