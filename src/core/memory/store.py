@@ -177,6 +177,50 @@ class EventLog:
         with self._lock:
             return self._seq_counter
 
+    def size_bytes(self) -> int:
+        """events.jsonl 当前字节数（未读游标基线用）。"""
+        try:
+            return self.filepath.stat().st_size
+        except OSError:
+            return 0
+
+    def read_from_offset(
+        self, offset: int = 0, limit: int = 100
+    ) -> tuple[List[Dict[str, Any]], int]:
+        """从字节偏移增量读事件（M1-08 未读增量用）。
+
+        为什么是字节偏移而不是 seq：未读注入在**每轮对话**的热路径上，
+        按 seq 从头扫 events.jsonl 会随文件增长越来越慢。events 只追加，
+        偏移是稳定游标；偏移超过文件大小（文件被换过/截断）时退回 0。
+
+        Returns:
+            (entries, 下次该用的偏移)。脏行跳过但偏移照常前进——坏一行
+            不能让整个未读通道卡死。
+        """
+        if not self.filepath.exists():
+            return [], max(0, int(offset))
+
+        try:
+            size = self.filepath.stat().st_size
+        except OSError:
+            return [], max(0, int(offset))
+        if offset < 0 or offset > size:
+            offset = 0
+
+        entries: List[Dict[str, Any]] = []
+        with open(self.filepath, "rb") as f:
+            f.seek(offset)
+            for _ in range(max(0, limit)):
+                line = f.readline()
+                if not line:
+                    break
+                try:
+                    entries.append(json.loads(line.decode("utf-8")))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    continue
+            new_offset = f.tell()
+        return entries, new_offset
+
 
 class CuratedStore:
     """提炼记忆存储（curated.jsonl）。

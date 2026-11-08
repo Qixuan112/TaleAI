@@ -204,6 +204,37 @@ def _build_memory_hits(
     )
 
 
+def _build_unread_inbox(
+    session: SessionContext,
+    now: datetime,
+    data: dict | None = None,
+    inbox=None,
+) -> ContextBlock:
+    """未读增量块（M1-08）：换会话时补"我不在时发生的事"。
+
+    内容来自 UnreadInbox 的规则拼装（新记忆 + 别的会话的事件原文），
+    永远不经过 LLM。读取成功即推进游标——重启不重复。
+
+    整块内容按外部文本转义：别人的会话原文同样可能夹带系统块标记。
+    """
+    if inbox is None or not session.owner or not session.session_id:
+        return ContextBlock(name="unread_inbox", kind="dynamic", order=40, content="")
+
+    try:
+        collected = inbox.collect(session, now.timestamp())
+        content = inbox.render(collected)
+    except Exception:
+        logger.exception("未读增量收集失败，本轮不注入（session=%s）", session.session_id)
+        return ContextBlock(name="unread_inbox", kind="dynamic", order=40, content="")
+
+    return ContextBlock(
+        name="unread_inbox",
+        kind="dynamic",
+        order=40,
+        content=escape_tag_markers(content),
+    )
+
+
 # 源名 → 构造函数。M1/M2 的新源（memory_hits / ledger_digest / unread_inbox）
 # 在这里登记，同时在下面的 spec 里挂上配额。
 # 第三个参数 data 是"本次装配的原料"（如 extract 的事件批次）——不是所有源
@@ -220,7 +251,11 @@ _BUILDERS: dict[str, Callable[..., ContextBlock]] = {
 _SPECS: dict[str, ContextSpec] = {
     "chat": ContextSpec(
         llm_name="chat",
-        sources=[("chat_env", 0, 0), ("memory_hits", 20, 2000)],
+        sources=[
+            ("chat_env", 0, 0),
+            ("memory_hits", 20, 2000),
+            ("unread_inbox", 20, 1000),
+        ],
     ),
     # M1-04：extract 的原料 = 对话片段 + 已有记忆（§十二 感知清单）
     "memory": ContextSpec(
@@ -237,17 +272,25 @@ class ContextAssembler:
         self,
         clock: Callable[[], datetime] | None = None,
         memory_retriever=None,
+        unread_inbox=None,
     ) -> None:
         # 时钟是个可替换的接缝：测试里注入固定时间，装配结果就完全确定，
         # 不用 sleep、也不用 mock 时间库。
         self._clock = clock or datetime.now
-        # 感知源默认用模块级的纯函数；带外部依赖的源（memory_hits 要查记忆库）
-        # 在这里按实例绑定——不改成全局单例，测试各自注入、互不串味。
+        # 感知源默认用模块级的纯函数；带外部依赖的源（memory_hits 查记忆库、
+        # unread_inbox 查未读游标）在这里按实例绑定——不改成全局单例，
+        # 测试各自注入、互不串味。
         self._builders = dict(_BUILDERS)
         if memory_retriever is not None:
             self._builders["memory_hits"] = (
                 lambda session, now, data: _build_memory_hits(
                     session, now, data, retriever=memory_retriever
+                )
+            )
+        if unread_inbox is not None:
+            self._builders["unread_inbox"] = (
+                lambda session, now, data: _build_unread_inbox(
+                    session, now, data, inbox=unread_inbox
                 )
             )
 

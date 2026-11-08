@@ -91,6 +91,14 @@ _ADDED_COLUMNS = {
     # 库里消息留作记忆素材（M1 提炼用），只是本轮对话不再看到它们。
     # 0（默认）= 没重置过，全部可见。
     "sessions": {"reset_seq": "INTEGER NOT NULL DEFAULT 0"},
+    # M1-08 未读增量：这条会话上次"看到"到哪里。
+    # event_seq 是全局事件游标；offset 是 events.jsonl 的字节偏移（热路径
+    # 增量读，不用每次从头扫文件）；at 是时间戳（用来挑"新记忆"）。
+    "session_cursors": {
+        "last_seen_seq": "INTEGER NOT NULL DEFAULT 0",
+        "last_seen_offset": "INTEGER NOT NULL DEFAULT 0",
+        "last_seen_at": "REAL NOT NULL DEFAULT 0",
+    },
 }
 
 
@@ -334,6 +342,46 @@ class SessionStore:
                 ON CONFLICT(session_id) DO UPDATE SET event_seq = excluded.event_seq
                 """,
                 (session_id, int(event_seq)),
+            )
+            self._db.commit()
+
+    def get_last_seen(self, session_id: str) -> tuple[int, int, float]:
+        """未读游标（M1-08）：(event_seq, 字节偏移, 时间戳)。
+
+        三者缺一不可：
+        - seq 做语义过滤（只取更新的事件）
+        - offset 做热路径增量读（不从头扫 events.jsonl）
+        - at 用来挑"上次看到之后新提炼的记忆"
+        """
+        row = self._db.execute(
+            "SELECT last_seen_seq, last_seen_offset, last_seen_at "
+            "FROM session_cursors WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        if row is None:
+            return 0, 0, 0.0
+        return (
+            int(row["last_seen_seq"] or 0),
+            int(row["last_seen_offset"] or 0),
+            float(row["last_seen_at"] or 0.0),
+        )
+
+    def set_last_seen(
+        self, session_id: str, event_seq: int, offset: int, ts: float
+    ) -> None:
+        """推进未读游标（读完注入后调用）。"""
+        with self._lock:
+            self._db.execute(
+                """
+                INSERT INTO session_cursors(
+                  session_id, last_seen_seq, last_seen_offset, last_seen_at
+                ) VALUES(?, ?, ?, ?)
+                ON CONFLICT(session_id) DO UPDATE SET
+                  last_seen_seq = excluded.last_seen_seq,
+                  last_seen_offset = excluded.last_seen_offset,
+                  last_seen_at = excluded.last_seen_at
+                """,
+                (session_id, int(event_seq), int(offset), float(ts)),
             )
             self._db.commit()
 
