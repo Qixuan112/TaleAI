@@ -52,13 +52,19 @@ class TestRecordEvent:
         assert calls[0].type == "message.received"
         assert calls[0].data["content"] == "你好"
 
-    def test_append_failure_does_not_block_publish(self, tmp_path: Path):
-        """落盘失败不阻塞 publish（记忆是增强，不是主链路）。"""
-        # 用一个只读路径模拟落盘失败
-        readonly_path = tmp_path / "readonly"
-        readonly_path.mkdir()
-        readonly_path.chmod(0o444)  # 只读
-        log = EventLog(readonly_path / "events.jsonl")
+    def test_append_failure_does_not_block_publish(self, tmp_path: Path, monkeypatch):
+        """落盘失败不阻塞 publish（记忆是增强，不是主链路）。
+
+        不用 chmod 造只读目录：Linux 上目录缺执行权限时，EventLog 构造里的
+        Path.exists() 就会抛 PermissionError（失败点根本不在 append）；Windows
+        上 chmod 又不生效，测试会假绿。直接替换 append 才能稳定测到目标行为。
+        """
+        log = EventLog(tmp_path / "events.jsonl")
+
+        def broken_append(*args, **kwargs):
+            raise PermissionError("模拟 events.jsonl 只读")
+
+        monkeypatch.setattr(log, "append", broken_append)
 
         bus = EventBus()
         calls = []
@@ -77,9 +83,6 @@ class TestRecordEvent:
         # publish 照常发出
         assert len(calls) == 1
         assert calls[0].type == "test"
-
-        # 恢复权限（cleanup）
-        readonly_path.chmod(0o755)
 
     def test_message_received_schema(self, tmp_path: Path):
         """message.received 的 data schema。"""
