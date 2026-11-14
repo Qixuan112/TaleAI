@@ -28,7 +28,7 @@ from typing import Callable
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import RedirectResponse, StreamingResponse
+from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from core.adapter.base import AdapterBase, Message, Reply
@@ -69,6 +69,7 @@ class WebAdapter(AdapterBase):
         port: int = 8000,
         history_provider: Callable[[str], list[dict]] | None = None,
         clearer: Callable[[str], int] | None = None,
+        sessions_provider: Callable[[], list[dict]] | None = None,
         stream: LogStream | None = None,
         extra_routes: Callable[[FastAPI], None] | None = None,
     ) -> None:
@@ -82,6 +83,9 @@ class WebAdapter(AdapterBase):
         # 清空历史的回调（session_id → 删掉的条数）。由 main 注入 store.clear。
         # 同样不直接传 store，理由同上；不注入就忽略清空请求。
         self._clearer = clearer
+        # M1-03：会话列表回调（() → [{id, platform, ...}]）。由 main 注入 store.sessions。
+        # 会话侧栏拉列表用它；不注入就退化成"单会话模式"（现有行为不变）。
+        self._sessions_provider = sessions_provider
         # 实时日志流（可选）。注入才挂 /events（SSE）与 /logs（调试页）——
         # 不注入时行为跟以前完全一样（大量测试构造裸适配器，不能被波及）。
         self._stream = stream
@@ -297,6 +301,21 @@ class WebAdapter(AdapterBase):
                 if self._connections.get(session_id) is websocket:
                     self._connections.pop(session_id, None)
                 logger.info("WebUI 已断开：session=%s", session_id)
+
+        # 会话列表（M1-03）：只读投影，供网页侧栏渲染。
+        # 用回调注入（同 history_provider 的理由：适配器不认识 SessionStore）。
+        # 不注入就不挂这条路由 → 前端退化为单会话模式（现有行为不变）。
+        if self._sessions_provider is not None:
+            sessions_provider = self._sessions_provider
+
+            @app.get("/api/sessions")
+            async def sessions() -> JSONResponse:
+                """会话列表（M1-03）。失败也回 200 + ok=false——前端统一处理。"""
+                try:
+                    return JSONResponse({"ok": True, "sessions": sessions_provider()})
+                except Exception:
+                    logger.exception("读会话列表失败")
+                    return JSONResponse({"ok": False, "error": "读会话列表失败"})
 
         # 实时日志（可选）：SSE 流 + 调试页。没注入 stream 就不挂这两条路由——
         # 大量测试构造裸适配器，行为必须跟以前一样。

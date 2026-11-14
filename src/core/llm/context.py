@@ -18,10 +18,23 @@ M0 只有「环境块」一个感知源——记忆(M1)、公共清单(M2) 还�
 
 from dataclasses import dataclass, field
 from datetime import datetime
+import logging
 import re
 from typing import Callable
 
+logger = logging.getLogger(__name__)
+logger.addHandler(logging.NullHandler())
+
 _WEEKDAYS = "一二三四五六日"
+
+#: 这些源的条目按「从旧到新」排列，截断时丢头部（旧）、保尾部（新）。
+#: 其余源默认保头部（memory_hits 已按分数从高到低排，丢尾部 = 丢低分）。
+_TRUNCATE_FROM_HEAD = {"unread_inbox"}
+
+
+def _estimate_tokens(text: str) -> int:
+    """token 粗估：中文约 1 字 1 token。宁可高估，不撑爆上下文。"""
+    return len(text)
 
 #: 动态块的开/闭标记（大小写不敏感）。用户/历史文本里出现它，说明这话想冒充
 #: 系统块——转义掉，别让模型把"用户说的话"读成"系统给的指示"。
@@ -88,7 +101,9 @@ class ContextSpec:
 _SESSION_TYPE_LABELS = {"private": "私聊", "group": "群聊"}
 
 
-def _build_chat_env(session: SessionContext, now: datetime) -> ContextBlock:
+def _build_chat_env(
+    session: SessionContext, now: datetime, data: dict | None = None
+) -> ContextBlock:
     """环境块：当前时间 + 会话类型（M1 起再加记忆摘要、未读等）。
 
     时间用「现在」是有意的——模型的知识截止到训练时，不给它当前时间，
@@ -104,32 +119,200 @@ def _build_chat_env(session: SessionContext, now: datetime) -> ContextBlock:
     return ContextBlock(name="chat_env", kind="dynamic", order=10, content="\n".join(lines))
 
 
+def _build_conversation_segment(
+    session: SessionContext, now: datetime, data: dict | None = None
+) -> ContextBlock:
+    """MemoryLLM extract 的原料：游标之后的一批对话事件。
+
+    每条带 seq——提示词要求 refs 指回它，写盘时也按这个 seq 校验引用，
+    模型编不出不存在的来源。
+
+    `data["events"]` 是 EventLog.read_batch() 的原始字典。只渲染两种事件：
+    message.received（用户）与 message.sent（我）；其它类型（session.closed
+    等）对提炼没有直接语义，跳过。
+    """
+    events = (data or {}).get("events") or []
+    lines: list[str] = []
+    for event in events:
+        etype = event.get("type")
+        payload = event.get("data") or {}
+        if etype == "message.received":
+            who, text = "用户", str(payload.get("content") or "")
+        elif etype == "message.sent":
+            who, text = "我", "\n".join(payload.get("messages") or [])
+        else:
+            continue
+        if text.strip():
+            # 用户原文里可能带 <system_reminder> 之类的标记；虽然这里进的是
+            # MemoryLLM 的 user 消息、不是系统块，仍按外部来源统一转义。
+            lines.append(f"[seq={event.get('seq')}] {who}：{escape_tag_markers(text)}")
+    return ContextBlock(
+        name="conversation_segment", kind="dynamic", order=20, content="\n".join(lines)
+    )
+
+
+def _build_existing_curated(
+    session: SessionContext, now: datetime, data: dict | None = None
+) -> ContextBlock:
+    """已有记忆（§十二：extract 必须看见，防重复 / 防冲突 / 支持更新）。
+
+    `data["existing"]` 是 CuratedStore.read_all() 的条目列表。
+    id 要露出来：模型输出 supersedes 时靠它指认旧条目。
+    """
+    entries = (data or {}).get("existing") or []
+    lines = [
+        f"- id={e.get('id')}｜重要度={e.get('importance')}｜{escape_tag_markers(str(e.get('content') or ''))}"
+        for e in entries
+        if str(e.get("content") or "").strip()
+    ]
+    return ContextBlock(
+        name="existing_curated", kind="dynamic", order=21, content="\n".join(lines)
+    )
+
+
+def _build_memory_hits(
+    session: SessionContext,
+    now: datetime,
+    data: dict | None = None,
+    retriever=None,
+) -> ContextBlock:
+    """相关记忆块（M1-07）：把检索到的 curated 条目注入 ChatLLM。
+
+    注入的是**记忆原文**——外部来源文本，必须转义系统块标记（见
+    ContextAssembler.render_reminder 的契约说明）。另外明确告诉模型
+    "这些可能过时"，避免它把旧计划当成刚刚发生的事。
+
+    没有 retriever / 没有 owner / 检索失败 → 空块（调用方会跳过空内容），
+    记忆是增强，绝不能因为它坏了让对话发不出去。
+    """
+    if retriever is None or not session.owner:
+        return ContextBlock(name="memory_hits", kind="dynamic", order=30, content="")
+
+    try:
+        entries = retriever.retrieve(
+            owner=session.owner,
+            session_id=session.session_id,
+            session_type=session.session_type,
+            now=now.timestamp(),
+        )
+    except Exception:
+        logger.exception("记忆检索失败，本轮不注入（owner=%s）", session.owner)
+        return ContextBlock(name="memory_hits", kind="dynamic", order=30, content="")
+
+    if not entries:
+        return ContextBlock(name="memory_hits", kind="dynamic", order=30, content="")
+
+    lines = ["以下是之前会话里记住的、关于当前用户的事（可能已过时，不是刚刚发生）："]
+    lines.extend(
+        f"- {escape_tag_markers(str(entry.get('content') or ''))}"
+        for entry in entries
+        if str(entry.get("content") or "").strip()
+    )
+    return ContextBlock(
+        name="memory_hits", kind="dynamic", order=30, content="\n".join(lines)
+    )
+
+
+def _build_unread_inbox(
+    session: SessionContext,
+    now: datetime,
+    data: dict | None = None,
+    inbox=None,
+) -> ContextBlock:
+    """未读增量块（M1-08）：换会话时补"我不在时发生的事"。
+
+    内容来自 UnreadInbox 的规则拼装（新记忆 + 别的会话的事件原文），
+    永远不经过 LLM。读取成功即推进游标——重启不重复。
+
+    整块内容按外部文本转义：别人的会话原文同样可能夹带系统块标记。
+    """
+    if inbox is None or not session.owner or not session.session_id:
+        return ContextBlock(name="unread_inbox", kind="dynamic", order=40, content="")
+
+    try:
+        collected = inbox.collect(session, now.timestamp())
+        content = inbox.render(collected)
+    except Exception:
+        logger.exception("未读增量收集失败，本轮不注入（session=%s）", session.session_id)
+        return ContextBlock(name="unread_inbox", kind="dynamic", order=40, content="")
+
+    return ContextBlock(
+        name="unread_inbox",
+        kind="dynamic",
+        order=40,
+        content=escape_tag_markers(content),
+    )
+
+
 # 源名 → 构造函数。M1/M2 的新源（memory_hits / ledger_digest / unread_inbox）
 # 在这里登记，同时在下面的 spec 里挂上配额。
-_BUILDERS: dict[str, Callable[[SessionContext, datetime], ContextBlock]] = {
+# 第三个参数 data 是"本次装配的原料"（如 extract 的事件批次）——不是所有源
+# 都用得上，所以带默认值；ContextAssembler 统一透传。
+_BUILDERS: dict[str, Callable[..., ContextBlock]] = {
     "chat_env": _build_chat_env,
+    "conversation_segment": _build_conversation_segment,
+    "existing_curated": _build_existing_curated,
 }
 
 # M0 只声明 ChatLLM 的感知清单（§22 备注）。M1 补：
 #   ("memory_hits", 20, 2000), ("unread_inbox", ...)
 # M2 补：("ledger_digest", ...)
 _SPECS: dict[str, ContextSpec] = {
-    "chat": ContextSpec(llm_name="chat", sources=[("chat_env", 0, 0)]),
+    "chat": ContextSpec(
+        llm_name="chat",
+        sources=[
+            ("chat_env", 0, 0),
+            ("memory_hits", 20, 2000),
+            ("unread_inbox", 20, 1000),
+        ],
+    ),
+    # M1-04：extract 的原料 = 对话片段 + 已有记忆（§十二 感知清单）
+    "memory": ContextSpec(
+        llm_name="memory",
+        sources=[("conversation_segment", 0, 0), ("existing_curated", 0, 0)],
+    ),
 }
 
 
 class ContextAssembler:
     """按 ContextSpec 装配感知块。各 LLM 不许自己拼上下文（§18.5 硬规则 6）。"""
 
-    def __init__(self, clock: Callable[[], datetime] | None = None) -> None:
+    def __init__(
+        self,
+        clock: Callable[[], datetime] | None = None,
+        memory_retriever=None,
+        unread_inbox=None,
+    ) -> None:
         # 时钟是个可替换的接缝：测试里注入固定时间，装配结果就完全确定，
         # 不用 sleep、也不用 mock 时间库。
         self._clock = clock or datetime.now
+        # 感知源默认用模块级的纯函数；带外部依赖的源（memory_hits 查记忆库、
+        # unread_inbox 查未读游标）在这里按实例绑定——不改成全局单例，
+        # 测试各自注入、互不串味。
+        self._builders = dict(_BUILDERS)
+        if memory_retriever is not None:
+            self._builders["memory_hits"] = (
+                lambda session, now, data: _build_memory_hits(
+                    session, now, data, retriever=memory_retriever
+                )
+            )
+        if unread_inbox is not None:
+            self._builders["unread_inbox"] = (
+                lambda session, now, data: _build_unread_inbox(
+                    session, now, data, inbox=unread_inbox
+                )
+            )
 
     def assemble(
-        self, llm_name: str, session: SessionContext | None = None
+        self,
+        llm_name: str,
+        session: SessionContext | None = None,
+        data: dict | None = None,
     ) -> list[ContextBlock]:
         """装配某个 LLM 的感知块，按 order 排序返回。
+
+        `data` 是本次装配的原料（如 MemoryLLM extract 的事件批次与已有记忆），
+        由调用方交给对应的源；chat 等不用的源直接忽略。
 
         未知 llm_name 直接报错——静默返回空列表会让"忘了声明 spec"
         变成一个查不出来的 bug。
@@ -143,18 +326,25 @@ class ContextAssembler:
 
         blocks: list[ContextBlock] = []
         for source, _count_quota, _token_quota in spec.sources:
-            builder = _BUILDERS.get(source)
+            builder = self._builders.get(source)
             if builder is None:
                 continue  # 该源还没有生产者，跳过（M1/M2 会补上）
-            blocks.append(builder(session, now))
+            blocks.append(builder(session, now, data))
 
         blocks.sort(key=lambda b: b.order)
         return blocks
 
-    def render_reminder(self, blocks: list[ContextBlock]) -> str:
+    def render_reminder(
+        self, blocks: list[ContextBlock], total_budget: int | None = None
+    ) -> str:
         """把动态块渲染成一个 <system_reminder> 文本块。
 
         没有动态块（或内容全空）→ 返回空串，调用方据此不拼任何东西。
+
+        total_budget（§19-17）：动态块总 token 预算。None / <=0 = 不限制
+        （测试与旧调用保持原行为）。超限时按 block.order 优先级依次保留，
+        装不下的块按行截断——unread_inbox 从旧到新丢（保最新），其余块
+        保留头部（memory_hits 已按分数降序，丢尾部 = 丢低分）。
 
         ⚠️ 契约（M1 预防）：任何将来把**用户原文/记忆原文**塞进动态块的 builder
         （M1 的 memory_hits 等），必须先经 escape_tag_markers——否则一段含
@@ -164,5 +354,64 @@ class ContextAssembler:
         dynamic = [b for b in blocks if b.kind == "dynamic" and b.content.strip()]
         if not dynamic:
             return ""
-        body = "\n".join(b.content.strip() for b in dynamic)
+
+        # 优先级：order 小的先保（chat_env > memory_hits > unread_inbox）。
+        # 这正是 §19-17 的「sessions 摘要 > memory > 跨会话事件」在当前源上的映射。
+        ordered = sorted(dynamic, key=lambda block: block.order)
+
+        if total_budget is None or total_budget <= 0:
+            body = "\n".join(block.content.strip() for block in ordered)
+            return f"<system_reminder>\n{body}\n</system_reminder>"
+
+        remaining = total_budget
+        parts: list[str] = []
+        for block in ordered:
+            if remaining <= 0:
+                break
+            text = block.content.strip()
+            cost = _estimate_tokens(text)
+            if cost <= remaining:
+                parts.append(text)
+                remaining -= cost
+                continue
+            trimmed = self._truncate_block(block, remaining)
+            trimmed = trimmed.strip()
+            if trimmed:
+                parts.append(trimmed)
+                remaining -= _estimate_tokens(trimmed)
+
+        if not parts:
+            return ""
+        body = "\n".join(parts)
         return f"<system_reminder>\n{body}\n</system_reminder>"
+
+    @staticmethod
+    def _truncate_block(block: ContextBlock, budget: int) -> str:
+        """按行截断一个块到预算内；第一行视为标题，尽量保留。"""
+        lines = block.content.strip().split("\n")
+        if not lines or budget <= 0:
+            return ""
+
+        if block.name in _TRUNCATE_FROM_HEAD:
+            header, body = lines[0], lines[1:]
+            kept: list[str] = []
+            used = _estimate_tokens(header)
+            for line in reversed(body):
+                cost = _estimate_tokens(line) + 1
+                if used + cost > budget:
+                    break
+                kept.insert(0, line)
+                used += cost
+            if kept:
+                return "\n".join([header, *kept])
+            return header if used <= budget else ""
+
+        kept = []
+        used = 0
+        for line in lines:
+            cost = _estimate_tokens(line) + 1
+            if used + cost > budget:
+                break
+            kept.append(line)
+            used += cost
+        return "\n".join(kept)

@@ -192,8 +192,13 @@ class ChatLLM:
     #: 配置整快照读取器：() -> {"llm": {...}, "api_key": "..."}。None = 不重载。
     #: 类属性兜底 + __init__ 赋实例属性遮盖——`__new__` 裸实例拿到的就是 None。
     settings_reader: "Callable[[], dict] | None" = None
+    #: 动态块总 token 预算（§19-17）。类属性兜底给 __new__ 裸实例。
+    context_token_budget: int = 3000
 
-    def __init__(self, bus: EventBus | None = None) -> None:
+    def __init__(
+        self, bus: EventBus | None = None, memory_retriever=None,
+        unread_inbox=None,
+    ) -> None:
         # 读配置（服务商 / 模型 / key）
         cfg = Config.load("config")
         secrets = Config.load("secrets")
@@ -227,10 +232,16 @@ class ChatLLM:
         self.history_lookback_extra: int = int(llm.get("history_lookback_extra", 5))
         # FC 循环上限（§19-2：全局 3 轮不变；配置只是让它可调，不是让它可变大）
         self.max_agent_steps: int = int(llm.get("max_agent_steps", 3))
+        # 动态块总预算（§19-17）：超限按 order 优先级截断，system 不参与。
+        self.context_token_budget: int = int(llm.get("context_token_budget", 3000))
         # 异步客户端（openai 3.x 是异步优先）
         self.client = AsyncOpenAI(base_url=self.base_url, api_key=self.api_key)
         # 上下文装配（M0-03 欠的那半）：动态块由它准备，本类不自己拼（§18.5 硬规则 6）
-        self.context = ContextAssembler()
+        # memory_retriever（M1-07）：注入相关记忆；unread_inbox（M1-08）：
+        # 注入"我不在时发生的事"。None = 不注入（CLI/测试裸装配）。
+        self.context = ContextAssembler(
+            memory_retriever=memory_retriever, unread_inbox=unread_inbox
+        )
         # 工具链（M0-05/06/07）：注册表提供工具表，执行器负责跑。
         # bus 透传给执行器——它执行完发 tool.called（§18.2），供日志页订阅。
         self.registry = PluginRegistry()
@@ -280,6 +291,7 @@ class ChatLLM:
             keep = int(llm.get("history_keep_messages", 10))
             extra = int(llm.get("history_lookback_extra", 5))
             steps = int(llm.get("max_agent_steps", 3))
+            budget = int(llm.get("context_token_budget", 3000))
             if not base_url or not model:
                 raise ValueError("llm.base_url / llm.model 为空")
         except Exception:
@@ -303,6 +315,7 @@ class ChatLLM:
         self.history_keep_messages = keep
         self.history_lookback_extra = extra
         self.max_agent_steps = steps
+        self.context_token_budget = budget
 
     def assemble_messages(
         self, user_question: str, history: list[dict[str, str]] | None = None,
@@ -366,7 +379,10 @@ class ChatLLM:
             )
 
         # 动态块包在 <system_reminder> 里，贴在最新提问前面
-        reminder = self.context.render_reminder(self.context.assemble("chat", session))
+        reminder = self.context.render_reminder(
+            self.context.assemble("chat", session),
+            total_budget=self.context_token_budget,
+        )
         # 用户提问先转义可能冒充系统块的标记，再拼到动态块后面——否则用户
         # 写一句 <system_reminder>…</system_reminder> 就能伪造系统提示
         # （PR #10 High）。转义只动标记字符，用户的话其余照旧。

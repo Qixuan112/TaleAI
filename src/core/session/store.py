@@ -91,6 +91,14 @@ _ADDED_COLUMNS = {
     # 库里消息留作记忆素材（M1 提炼用），只是本轮对话不再看到它们。
     # 0（默认）= 没重置过，全部可见。
     "sessions": {"reset_seq": "INTEGER NOT NULL DEFAULT 0"},
+    # M1-08 未读增量：这条会话上次"看到"到哪里。
+    # event_seq 是全局事件游标；offset 是 events.jsonl 的字节偏移（热路径
+    # 增量读，不用每次从头扫文件）；at 是时间戳（用来挑"新记忆"）。
+    "session_cursors": {
+        "last_seen_seq": "INTEGER NOT NULL DEFAULT 0",
+        "last_seen_offset": "INTEGER NOT NULL DEFAULT 0",
+        "last_seen_at": "REAL NOT NULL DEFAULT 0",
+    },
 }
 
 
@@ -131,6 +139,15 @@ def _media_keys(row: sqlite3.Row) -> dict:
     if row["reply_to"]:
         out["reply_to"] = row["reply_to"]
     return out
+
+
+def _fallback_title(session_id: str) -> str:
+    """标题为空时给会话列表一个可读名字：`web:ab12cd34` → `会话 ab12cd34`。
+
+    为什么不在前端拼：列表是投影，后端一次给全，前端只负责渲染（XSS 面更小）。
+    """
+    tail = session_id.split(":", 1)[-1]
+    return f"会话 {tail}" if tail else "会话"
 
 
 class SessionStore:
@@ -224,6 +241,63 @@ class SessionStore:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def sessions_for_web(self, platform: str = "web") -> list[dict]:
+        """WebUI 会话列表的投影（M1-03）。
+
+        与 sessions() 的区别：
+        - 只返回指定平台的会话（WebUI 不该枚举 QQ/CLI 会话）
+        - 一次聚合查询带出列表要展示的派生字段，**不逐会话扫 messages**
+          （DSH 的 projcache 思路：列表读投影，不重扫日志）
+
+        返回：[{id, title, kind, last_active, date, count, preview}]
+        """
+        rows = self._db.execute(
+            """
+            SELECT
+              s.id, s.title, s.kind, s.last_active,
+              (SELECT COUNT(*) FROM messages m
+                WHERE m.session_id = s.id AND m.seq > s.reset_seq) AS count,
+              (SELECT m.content FROM messages m
+                WHERE m.session_id = s.id AND m.seq > s.reset_seq
+                ORDER BY m.seq DESC LIMIT 1) AS last_content
+            FROM sessions s
+            WHERE s.platform = ?
+            ORDER BY s.last_active DESC
+            """,
+            (platform,),
+        ).fetchall()
+
+        out: list[dict] = []
+        for r in rows:
+            last_content = r["last_content"] or ""
+            out.append({
+                "id": r["id"],
+                "title": r["title"] or _fallback_title(r["id"]),
+                "kind": r["kind"],
+                "last_active": r["last_active"],
+                "date": time.strftime("%m-%d", time.localtime(r["last_active"])),
+                "count": int(r["count"] or 0),
+                "preview": last_content[:40],
+            })
+        return out
+
+    def set_title_if_empty(self, session_id: str, title: str, limit: int = 20) -> None:
+        """标题为空时写入（DSH 的 session/title fallback 思路）。
+
+        首条用户消息落库后调用；已有标题不动——标题只定一次，
+        避免每轮对话把用户起的名字覆盖掉（LLM 生成标题留到以后）。
+        """
+        clipped = title.strip().replace("\n", " ")[:limit]
+        if not clipped:
+            return
+        with self._lock:
+            self._db.execute(
+                "UPDATE sessions SET title = ? WHERE id = ? "
+                "AND (title IS NULL OR title = '')",
+                (clipped, session_id),
+            )
+            self._db.commit()
+
     def by_tag(self, tag: str) -> list[dict]:
         """按标签找会话（§22 的 `by_tag()`）。
 
@@ -245,6 +319,71 @@ class SessionStore:
             "SELECT reset_seq FROM sessions WHERE id = ?", (session_id,)
         ).fetchone()
         return int(row["reset_seq"]) if row is not None and row["reset_seq"] else 0
+
+    def get_cursor(self, session_id: str) -> int:
+        """extract 游标：这条会话已经提炼到哪个全局 event seq。
+
+        游标**落在磁盘上**（§18.4）：队列丢了、进程重启，都按它重扫，
+        已提炼过的事件不会被重复提炼。
+        """
+        row = self._db.execute(
+            "SELECT event_seq FROM session_cursors WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        return int(row["event_seq"]) if row is not None and row["event_seq"] else 0
+
+    def set_cursor(self, session_id: str, event_seq: int) -> None:
+        """推进 extract 游标（只在提炼成功后调用）。"""
+        with self._lock:
+            self._db.execute(
+                """
+                INSERT INTO session_cursors(session_id, event_seq)
+                VALUES(?, ?)
+                ON CONFLICT(session_id) DO UPDATE SET event_seq = excluded.event_seq
+                """,
+                (session_id, int(event_seq)),
+            )
+            self._db.commit()
+
+    def get_last_seen(self, session_id: str) -> tuple[int, int, float]:
+        """未读游标（M1-08）：(event_seq, 字节偏移, 时间戳)。
+
+        三者缺一不可：
+        - seq 做语义过滤（只取更新的事件）
+        - offset 做热路径增量读（不从头扫 events.jsonl）
+        - at 用来挑"上次看到之后新提炼的记忆"
+        """
+        row = self._db.execute(
+            "SELECT last_seen_seq, last_seen_offset, last_seen_at "
+            "FROM session_cursors WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        if row is None:
+            return 0, 0, 0.0
+        return (
+            int(row["last_seen_seq"] or 0),
+            int(row["last_seen_offset"] or 0),
+            float(row["last_seen_at"] or 0.0),
+        )
+
+    def set_last_seen(
+        self, session_id: str, event_seq: int, offset: int, ts: float
+    ) -> None:
+        """推进未读游标（读完注入后调用）。"""
+        with self._lock:
+            self._db.execute(
+                """
+                INSERT INTO session_cursors(
+                  session_id, last_seen_seq, last_seen_offset, last_seen_at
+                ) VALUES(?, ?, ?, ?)
+                ON CONFLICT(session_id) DO UPDATE SET
+                  last_seen_seq = excluded.last_seen_seq,
+                  last_seen_offset = excluded.last_seen_offset,
+                  last_seen_at = excluded.last_seen_at
+                """,
+                (session_id, int(event_seq), int(offset), float(ts)),
+            )
+            self._db.commit()
 
     def mark_reset(self, session_id: str) -> int:
         """把重置点推到当前最新（&newtale 的"忘掉"）。

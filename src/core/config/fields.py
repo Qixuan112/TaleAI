@@ -90,6 +90,57 @@ _CONFIG_FIELDS = (
         choices=("group", "all", "off"),
         help="group=仅群聊（私聊/网页直接回）；all=所有会话都要唤醒词；off=关闭",
     ),
+    # ---- 记忆系统（M1-10）：面板按这些定义自动渲染，改完下一轮生效 ----
+    FieldSpec(
+        key="llm.context_token_budget", label="动态块总预算（token）", type="number",
+        default=3000,
+        help="环境 + 记忆 + 未读合计；超限按优先级截断，system 不参与",
+    ),
+    FieldSpec(
+        key="memory.half_life_days", label="记忆半衰期（天）", type="number",
+        default=2,
+        help="每过这么久，记忆的检索权重减半（2026-11-08 定为 2 天）",
+    ),
+    FieldSpec(
+        key="memory.forget_threshold", label="遗忘分数阈值", type="number",
+        default=0.5,
+        help="衰减分低于它、且够老 → 打墓碑（遗忘不等于删除）",
+    ),
+    FieldSpec(
+        key="memory.min_age_for_forget_days", label="遗忘最小年龄（天）", type="number",
+        default=30,
+        help="新记忆不会立刻被忘；超过这个年龄才参与遗忘判定",
+    ),
+    FieldSpec(
+        key="memory.importance_never_forget", label="永不遗忘的重要度", type="number",
+        default=4,
+        help="importance 大于等于它（默认 4）的记忆永不自动遗忘",
+    ),
+    FieldSpec(
+        key="memory.extract_idle_minutes", label="静默提炼（分钟）", type="number",
+        default=10,
+        help="会话静默这么久后，后台自动把新对话提炼成记忆",
+    ),
+    FieldSpec(
+        key="memory.consolidate_interval_hours", label="整合间隔（小时）", type="number",
+        default=6,
+        help="后台多久跑一次整合/遗忘判定",
+    ),
+    FieldSpec(
+        key="memory.consolidate_event_threshold", label="整合事件阈值", type="number",
+        default=50,
+        help="新事件达到这么多条时，不等间隔、立刻跑一次整合",
+    ),
+    FieldSpec(
+        key="memory.retrieve_top_k", label="检索条数上限", type="number",
+        default=20,
+        help="每次对话最多注入多少条记忆（按衰减分排序后截断）",
+    ),
+    FieldSpec(
+        key="memory.retrieve_token_budget", label="检索 token 预算", type="number",
+        default=2000,
+        help="记忆注入的单独预算；总预算见「动态块总预算」",
+    ),
 )
 
 _PERSONA_FIELDS = (
