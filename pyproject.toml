@@ -1,6 +1,6 @@
 [project]
 name = "taleai"
-version = "0.1.1"
+version = "0.2.0"
 description = "TaleAI：对外单一人格、内部多智能体协作的数字生命"
 readme = "README.md"
 requires-python = ">=3.11"
